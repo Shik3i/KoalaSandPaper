@@ -15,9 +15,11 @@ var pool: SlotPool
 var rng := Spawn.rng_for(2718)
 var view: ParticleView
 var mview: MachineView
+var hud: Hud
 var next_piece := 0.5
 var spawned := 0
 var piece_slot := 0
+var prefill_n := 0
 var cpu_machine_us := 0
 var cpu_step_us := 0
 var t0 := 0
@@ -43,23 +45,14 @@ func _ready() -> void:
 	pool = SlotPool.new(CAPACITY)
 	_prefill(int(args.get("prefill", 8000)))
 
-	var sz := get_viewport_rect().size
-	var ppm := minf(sz.x / Factory.WORLD.x, sz.y / Factory.WORLD.y)
-	mview = MachineView.new()
-	mview.machine = factory
-	mview.px_per_m = ppm
-	mview.world_h = Factory.WORLD.y
-	add_child(mview)
-	view = ParticleView.new()
-	add_child(view)
-	view.bind(solver, ppm)
-	_labels(ppm)
+	_compose()
 	t0 = Time.get_ticks_msec()
 
 
 func _prefill(n: int) -> void:
 	var s := Factory.fill_bowl(factory, factory.bowl_c, factory.bowl_r, n, rng)
 	solver.write_set(pool.alloc(s.size()), s)
+	prefill_n = s.size()
 
 
 func _spawn_piece() -> void:
@@ -91,27 +84,100 @@ func _process(_d: float) -> void:
 		solver.reset_stats()
 	if solver.frames % 60 == 0:
 		pool.request_refresh(solver)
+	if solver.frames % 30 == 0 and hud:
+		hud.request(solver, spawned + prefill_n)
 	if args.has("shots") and str(solver.frames) in args.shots.split(","):
 		_shot(args.shot.replace(".png", "_f%d.png" % solver.frames))
 	if args.has("frames") and solver.frames >= int(args.frames):
 		_report()
 
 
-func _labels(ppm: float) -> void:
-	var title := Label.new()
-	title.text = "KOALASANDPAPER / KINETIC STUDY 001"
-	title.position = Vector2(1.2, 0.18) * ppm
-	title.add_theme_font_size_override("font_size", int(0.16 * ppm))
-	title.modulate = Color("#8fa3a8")
-	add_child(title)
-	for k in factory.stations:
-		var l := Label.new()
-		l.text = k
-		var p: Vector2 = factory.stations[k]
-		l.position = Vector2(p.x, Factory.WORLD.y - p.y) * ppm
-		l.add_theme_font_size_override("font_size", int(0.11 * ppm))
-		l.modulate = Color("#6f8388")
-		add_child(l)
+## Layers back to front: hall gradient, dressing, fire, mechanism dressing,
+## grain shadows, grains, machine, embers/smoke, HUD; HDR bloom on top.
+func _compose() -> void:
+	var sz := get_viewport_rect().size
+	var ppm := minf(sz.x / Factory.WORLD.x, sz.y / Factory.WORLD.y)
+	var to_px := func(p: Vector2) -> Vector2: return Vector2(p.x, Factory.WORLD.y - p.y) * ppm
+
+	var bg := ColorRect.new()
+	bg.size = sz
+	var bm := ShaderMaterial.new()
+	bm.shader = load("res://render/background.gdshader")
+	bm.set_shader_parameter("px_per_m", ppm)
+	bm.set_shader_parameter("size_px", sz)
+	bg.material = bm
+	bg.z_index = -100
+	add_child(bg)
+
+	var bd := Backdrop.new()
+	bd.f = factory
+	bd.px_per_m = ppm
+	bd.world_h = Factory.WORLD.y
+	bd.z_index = -60
+	add_child(bd)
+
+	var fr: Rect2 = factory.furnace
+	var fire := ColorRect.new()
+	var a: Vector2 = to_px.call(Vector2(fr.position.x + 0.04, 1.75))
+	var b: Vector2 = to_px.call(Vector2(fr.end.x - 0.04, fr.position.y + 0.02))
+	fire.position = a
+	fire.size = b - a
+	var fm := ShaderMaterial.new()
+	fm.shader = load("res://render/fire.gdshader")
+	fm.set_shader_parameter("intensity", 0.75)
+	fire.material = fm
+	fire.z_index = -50
+	add_child(fire)
+
+	var back := MachineView.new()
+	back.machine = factory
+	back.px_per_m = ppm
+	back.world_h = Factory.WORLD.y
+	back.layer = "back"
+	back.z_index = -40
+	add_child(back)
+	mview = back
+
+	var shadow := ParticleView.new()
+	shadow.z_index = -20
+	add_child(shadow)
+	shadow.bind(solver, ppm, true)
+	view = ParticleView.new()
+	add_child(view)
+	view.bind(solver, ppm)
+
+	var front := MachineView.new()
+	front.machine = factory
+	front.px_per_m = ppm
+	front.world_h = Factory.WORLD.y
+	front.z_index = 10
+	add_child(front)
+
+	var em := Fx.embers(Rect2(a + Vector2(0, (b - a).y * 0.55), Vector2((b - a).x, (b - a).y * 0.4)), ppm)
+	em.z_index = 20
+	add_child(em)
+	var chimney_top: Vector2 = to_px.call(Vector2(fr.end.x - 0.55, Factory.WORLD.y - 0.05))
+	var sm := Fx.smoke(chimney_top, ppm)
+	sm.z_index = 20
+	add_child(sm)
+
+	var env := Environment.new()
+	env.background_mode = Environment.BG_CANVAS
+	env.glow_enabled = true
+	env.glow_intensity = 0.9
+	env.glow_strength = 1.1
+	env.glow_bloom = 0.04
+	env.glow_hdr_threshold = 0.85
+	env.glow_blend_mode = Environment.GLOW_BLEND_MODE_ADDITIVE
+	for lvl in [1, 2, 3, 4, 5]:
+		env.set_glow_level(lvl, 1.0 if lvl in [2, 3, 4] else 0.0)
+	var we := WorldEnvironment.new()
+	we.environment = env
+	add_child(we)
+
+	hud = Hud.new()
+	hud.setup(factory, ppm)
+	add_child(hud)
 
 
 func _shot(path: String) -> void:

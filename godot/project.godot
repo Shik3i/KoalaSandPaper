@@ -16,5 +16,7 @@ window/stretch/aspect="keep"
 
 [rendering]
 
+viewport/hdr_2d=false
+
 renderer/rendering_method="forward_plus"
 environment/defaults/default_clear_color=Color(0.0667, 0.1176, 0.1569, 1)
