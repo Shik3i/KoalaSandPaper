@@ -12,6 +12,9 @@
 #define KIND_GRAIN 1u
 #define KIND_BONDED 2u
 #define KIND_SPARK 3u
+// Grain of an intact rigid piece: position follows its body (rigid_solve.glsl).
+#define KIND_RIGID 4u
+#define BODIES_PER_PIECE 4u
 
 #define FLAG_LAST 1u
 // bit 1: no pre-stabilisation; bit 2: grid parity of this substep.
@@ -73,6 +76,18 @@ layout(set = 0, binding = 16, std430) restrict buffer StabBuf { vec2 STAB[]; };
 // solve, VOLD = velocity at the substep start; the pass writes the final V.
 layout(set = 0, binding = 17, std430) restrict buffer VNBuf { vec2 VN[]; };
 layout(set = 0, binding = 18, std430) restrict buffer VOldBuf { vec2 VOLD[]; };
+// Rigid pieces. REST: grain position in the piece's rest frame. BODY_OF: body
+// index (piece * 4 + sub) or CELL_NONE; kept after shattering as fragment id.
+layout(set = 0, binding = 19, std430) restrict buffer RestBuf { vec2 REST[]; };
+layout(set = 0, binding = 20, std430) restrict buffer BodyOfBuf { uint BODY_OF[]; };
+// Per body 4 vec4: [0] c.xy, angle, alive | [1] v.xy, omega, mass
+// [2] predicted c.xy, angle, inertia | [3] rest COM c0.xy, crush counter, 0
+layout(set = 0, binding = 21, std430) restrict buffer RBodyBuf { vec4 RB[]; };
+// Per piece: start slot, count, sub-bodies used, 0.
+layout(set = 0, binding = 22, std430) restrict buffer PieceBuf { uvec4 PIECES[]; };
+// Rigid grains: surface friction demand (tangential slip t.xy, mu_s*pen, mu_k*pen),
+// resolved per body in rigid_solve (Coulomb at piece level, translation only).
+layout(set = 0, binding = 23, std430) restrict buffer FricBuf { vec4 FRIC[]; };
 
 layout(push_constant, std430) uniform Params {
 	vec2 world;
@@ -93,6 +108,10 @@ layout(push_constant, std430) uniform Params {
 	float sleep;    // displacement below which a particle keeps its position (m/substep)
 	float r_max;
 	float pad0;
+	uint n_pieces;
+	float crush;    // rigid residual (m) above which a squeezed piece shatters
+	float kerf;     // laser kerf half width (m)
+	float pad1;
 	vec2 laser_a;   // laser beam segment (a == b: off); cuts every bond crossing it
 	vec2 laser_b;
 } pc;
@@ -109,6 +128,26 @@ uint par() { return (pc.flags & FLAG_PARITY) != 0u ? 1u : 0u; }
 uint cells_total() { return pc.grid_w * pc.grid_h; }
 uint count_at(uint cell) { return min(CELL_COUNT[par() * cells_total() + cell], CELL_CAP); }
 uint cell_of(uint i) { return CELL_OF[par() * pc.n + i]; }
+
+// Inverse mass used for contact splitting: rigid grains carry their body's mass.
+float particle_w(uint i, uint info, float rad) {
+	if (kind_of(info) == KIND_RIGID) return 1.0 / RB[4u * BODY_OF[i] + 1u].w;
+	return inv_mass(info, rad);
+}
+
+bool bonded_to(uint i, uint j) {
+	for (uint k = 0u; k < MAX_BONDS; k++) {
+		if (BONDS[i * MAX_BONDS + k].x == j + 1u) return true;
+	}
+	return false;
+}
+
+// Pairs handled by their own constraint (same rigid body, intact bond) get no contact.
+bool same_unit(uint i, uint j, uint ki, uint kj) {
+	if (ki == KIND_RIGID && kj == KIND_RIGID) return BODY_OF[i] == BODY_OF[j];
+	if (ki == KIND_BONDED && kj == KIND_BONDED) return bonded_to(i, j);
+	return false;
+}
 
 uvec2 cell_coord(vec2 p) {
 	ivec2 c = ivec2(floor(p * pc.inv_cell));
@@ -158,12 +197,20 @@ vec2 friction(vec2 n, float pen, vec2 rel, float mu_s, float mu_k) {
 // particles and bonds, projected sequentially (Gauss-Seidel): corners resolve
 // exactly and pile pressure can never push a grain inside.
 struct Surf {
-	vec2 p;  // current position
-	vec2 d;  // current displacement (friction acts on d - surface displacement)
+	vec2 p;     // current position
+	vec2 d;     // current displacement (friction acts on d - surface displacement)
+	bool rigid; // rigid grain: normal only, friction demand accumulated in fr
+	vec4 fr;
 };
 
 void surface_contact(vec2 n, float pen, vec2 surf_disp, float mu_s, float mu_k, inout Surf s) {
-	vec2 c = n * pen + friction(n, pen, s.d - surf_disp, mu_s, mu_k);
+	vec2 c = n * pen;
+	if (s.rigid) {
+		vec2 rel = s.d - surf_disp;
+		s.fr += vec4(rel - dot(rel, n) * n, mu_s * pen, mu_k * pen);
+	} else {
+		c += friction(n, pen, s.d - surf_disp, mu_s, mu_k);
+	}
 	s.p += c;
 	s.d += c;
 }

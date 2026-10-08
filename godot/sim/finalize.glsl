@@ -21,6 +21,12 @@ void main() {
 	}
 	vec2 x = X[i] + STAB[i];
 	vec2 d = D_IN[i];
+	if (kind == KIND_RIGID) {
+		// Final pose solved by rigid_solve.glsl.
+		uint b = BODY_OF[i];
+		vec4 c = RB[4u * b];
+		d = c.xy + rot(c.z) * (REST[i] - RB[4u * b + 3u].xy) - x;
+	}
 	float dl = length(d);
 	if (dl > pc.max_step) {
 		d *= pc.max_step / dl;

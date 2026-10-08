@@ -13,8 +13,15 @@ void main() {
 		CELL_OF[par() * pc.n + i] = CELL_NONE;
 		return;
 	}
-	vec2 v = V[i] + pc.gravity * pc.h;
-	vec2 d = v * pc.h;
+	vec2 d;
+	if (kind == KIND_RIGID) {
+		// Grain rides its body's predicted pose (rigid_predict.glsl).
+		uint b = BODY_OF[i];
+		vec4 ps = RB[4u * b + 2u];
+		d = ps.xy + rot(ps.z) * (REST[i] - RB[4u * b + 3u].xy) - X[i];
+	} else {
+		d = (V[i] + pc.gravity * pc.h) * pc.h;
+	}
 	float dl = length(d);
 	if (dl > pc.max_step) {
 		d *= pc.max_step / dl;

@@ -17,13 +17,6 @@ bool segments_cross(vec2 p1, vec2 p2, vec2 q1, vec2 q2) {
 	return t >= 0.0 && t <= 1.0 && u >= 0.0 && u <= 1.0;
 }
 
-// Intact bond i–j: the bond owns that pair, no contact constraint on top.
-bool bonded_to(uint i, uint j) {
-	for (uint k = 0u; k < MAX_BONDS; k++) {
-		if (BONDS[i * MAX_BONDS + k].x == j + 1u) return true;
-	}
-	return false;
-}
 
 void main() {
 	uint i = gl_GlobalInvocationID.x;
@@ -36,7 +29,7 @@ void main() {
 	vec2 pi = xi + dxi;
 	float ri = RAD[i];
 	vec4 mi = MAT[2u * mat_of(info)];
-	float wi = inv_mass(info, ri);
+	float wi = particle_w(i, info, ri);
 	Acc a = Acc(vec2(0.0), 0.0, 0.0);
 	float max_pen = 0.0;
 
@@ -63,7 +56,7 @@ void main() {
 				if (d2 >= d0 * d0) continue;
 				uint infoj = INFO[j];
 				if (kind_of(infoj) == KIND_SPARK || kind == KIND_SPARK) continue;
-				if (kind == KIND_BONDED && kind_of(infoj) == KIND_BONDED && bonded_to(i, j)) continue;
+				if (same_unit(i, j, kind, kind_of(infoj))) continue;
 				float dist = sqrt(d2);
 				vec2 n = dist > 1e-9 * pc.r ? dv / dist : vec2(0.0, i < j ? 1.0 : -1.0);
 				float pen = d0 - dist;
@@ -71,7 +64,7 @@ void main() {
 				// Shock propagation: the lower particle acts heavier.
 				float b = exp(pc.stack_k * dv.y / pc.r);
 				float wib = wi * b;
-				float s_i = wib / (wib + inv_mass(infoj, rj));
+				float s_i = wib / (wib + particle_w(j, infoj, rj));
 				acc_add(a, s_i * (n * pen + friction(n, pen, dxi - dxj, 0.5 * (mi.x + mj.x), 0.5 * (mi.y + mj.y))));
 				max_pen = max(max_pen, pen / min(ri, rj));
 			}
@@ -91,13 +84,15 @@ void main() {
 			float dist = length(dv);
 			float C = dist - rest;
 			bool cut = laser && segments_cross(pi, pi - dv, pc.laser_a, pc.laser_b);
-			if (abs(C) > mb.y * rest || cut || kind_of(INFO[j]) == KIND_NONE) {
+			// Partner burnt, sunk or in another fragment (laser split): bond gone.
+			bool gone = kind_of(INFO[j]) != KIND_BONDED || BODY_OF[j] != BODY_OF[i];
+			if (abs(C) > mb.y * rest || cut || gone) {
 				BONDS[i * MAX_BONDS + k].x = bd.x | 0x80000000u;
 				atomicAdd(STATS[ST_BROKEN], 1u);
 				continue;
 			}
 			if (dist < 1e-12) continue;
-			float wj = inv_mass(INFO[j], RAD[j]);
+			float wj = particle_w(j, INFO[j], RAD[j]);
 			acc_add(a, (-C * wi / (wi + wj + alpha)) * (dv / dist));
 		}
 	}
@@ -106,10 +101,11 @@ void main() {
 	// and bond corrections, so loads transmitted through bonds/contacts within
 	// this pass are subject to static friction (and never push through walls).
 	vec2 d1 = dxi + pc.omega * acc_total(a);
-	Surf su = Surf(xi + d1, d1);
+	Surf su = Surf(xi + d1, d1, kind == KIND_RIGID, vec4(0.0));
 	if (kind != KIND_SPARK) collider_contacts(pc.t_sub, false, ri, mi, su);
 	world_walls(ri, mi, su);
 
 	if ((pc.flags & FLAG_LAST) != 0u) atomic_max_f(ST_MAX_PEN, max_pen);
 	D_OUT[i] = su.d;
+	if (kind == KIND_RIGID) FRIC[i] = su.fr;
 }

@@ -9,7 +9,9 @@ const MAX_BONDS := 6
 const WG := 256
 const MAX_BODIES := 64
 const MAX_PRIMS := 256
-const KERNELS := ["integrate", "stabilize", "contacts", "finalize", "velocity"]
+const KERNELS := ["rigid_predict", "integrate", "stabilize", "contacts", "rigid_solve", "finalize", "velocity"]
+const MAX_PIECES := 256
+const BODIES_PER_PIECE := 4
 const STAT_KEYS := ["clamp", "overflow", "nan", "oob", "max_pen_r", "max_speed", "broken", "sunk"]
 
 var rd: RenderingDevice
@@ -29,6 +31,10 @@ var n_prims := 0
 ## Laser beam segment for this frame (a == b: off).
 var laser_a := Vector2.ZERO
 var laser_b := Vector2.ZERO
+## Laser kerf half width (m); grains inside burn to free grains.
+var kerf := 0.008
+## Rigid-piece crush threshold in units of R (unsatisfied correction per substep).
+var crush := 0.3
 var render_texture: Texture2DRD
 var frames := 0
 ## Pre-stabilisation pass per substep (Macklin 2014 §4.4).
@@ -50,8 +56,15 @@ func setup(cap: int, world_size: Vector2, materials: Array = SimConst.MATERIALS)
 	world = world_size
 	grid = Vector2i(ceili(world.x / (2.0 * r_max)), ceili(world.y / (2.0 * r_max)))
 	var cells := grid.x * grid.y
-	for k in ["x", "pa", "pb", "v", "stab", "vn", "vold"]:
+	for k in ["x", "pa", "pb", "v", "stab", "vn", "vold", "rest"]:
 		_sbuf(k, cap * 8)
+	var none := PackedInt32Array()
+	none.resize(cap)
+	none.fill(-1)
+	_sbuf("body_of", cap * 4, none.to_byte_array())
+	_sbuf("rb", MAX_PIECES * BODIES_PER_PIECE * 64)
+	_sbuf("pieces", MAX_PIECES * 16)
+	_sbuf("fric", cap * 16)
 	for k in ["info", "color", "rad"]:
 		_sbuf(k, cap * 4)
 	# Grid double-buffered by substep parity (see common.glsli).
@@ -82,7 +95,10 @@ func setup(cap: int, world_size: Vector2, materials: Array = SimConst.MATERIALS)
 
 	for k in KERNELS:
 		var file: RDShaderFile = load("res://sim/%s.glsl" % k)
-		var shader := rd.shader_create_from_spirv(file.get_spirv())
+		var spirv := file.get_spirv()
+		if spirv.compile_error_compute != "":
+			push_error("%s.glsl: %s" % [k, spirv.compile_error_compute])
+		var shader := rd.shader_create_from_spirv(spirv)
 		assert(shader.is_valid(), "shader failed: " + k)
 		_shaders.append(shader)
 		_pipes[k] = rd.compute_pipeline_create(shader)
@@ -111,6 +127,42 @@ func write_set(offset: int, s: ParticleSet) -> void:
 	rd.buffer_update(_buf.bonds, offset * MAX_BONDS * 8, bb.size(), bb)
 
 
+## Spawns a rigid piece: particles of `s` (positions = rest layout placed at
+## `origin`, rest frame = s.x - origin) at slots [offset, offset + n).
+func spawn_piece(piece: int, offset: int, s: ParticleSet, origin: Vector2, vel: Vector2) -> void:
+	var n := s.size()
+	var info := s.info.duplicate()
+	for i in n:
+		info[i] = (info[i] & ~0xff00) | (4 << 8)
+	var rest := PackedVector2Array()
+	var c0 := Vector2.ZERO
+	for p in s.x:
+		rest.append(p - origin)
+		c0 += p - origin
+	c0 /= n
+	var vv := PackedVector2Array()
+	vv.resize(n)
+	vv.fill(vel)
+	write(offset, s.x, vv, info, s.color, s.rad)
+	var bb := s.bond_bytes(offset)
+	rd.buffer_update(_buf.bonds, offset * MAX_BONDS * 8, bb.size(), bb)
+	rd.buffer_update(_buf.rest, offset * 8, n * 8, rest.to_byte_array())
+	var bo := PackedInt32Array()
+	bo.resize(n)
+	bo.fill(piece * BODIES_PER_PIECE)
+	rd.buffer_update(_buf.body_of, offset * 4, n * 4, bo.to_byte_array())
+	var body := PackedFloat32Array()
+	body.resize(BODIES_PER_PIECE * 16)
+	var c := origin + c0
+	body[0] = c.x; body[1] = c.y; body[2] = 0.0; body[3] = 1.0
+	body[4] = vel.x; body[5] = vel.y; body[6] = 0.0; body[7] = n * SimConst.mass(SimConst.MATERIALS[1].density, radius)
+	body[8] = c.x; body[9] = c.y; body[10] = 0.0; body[11] = 1.0
+	body[12] = c0.x; body[13] = c0.y
+	rd.buffer_update(_buf.rb, piece * BODIES_PER_PIECE * 64, body.size() * 4, body.to_byte_array())
+	var pd := PackedInt32Array([offset, n, 1, 0])
+	rd.buffer_update(_buf.pieces, piece * 16, 16, pd.to_byte_array())
+
+
 ## Machine colliders: bodies = 8 floats each, prims = 64 bytes each (see colliders.glsli).
 func set_colliders(bodies: PackedFloat32Array, prims: PackedByteArray) -> void:
 	assert(bodies.size() <= MAX_BODIES * 8 and prims.size() <= MAX_PRIMS * 64)
@@ -132,12 +184,14 @@ func step(frame_dt: float = SimConst.DT) -> void:
 		_parity = 1 - _parity
 		var flags := (1 if last else 0) | nostab | (4 * _parity)
 		var p := _push(h, t, flags)
+		_dispatch(cl, "rigid_predict", 0, p, ceili(float(MAX_PIECES * BODIES_PER_PIECE) / WG))
 		_dispatch(cl, "integrate", 0, p, groups)
 		_dispatch(cl, "stabilize", 0, p, groups)
 		var cur := 0
 		for it in iterations:
 			_dispatch(cl, "contacts", cur, _push(h, t, flags | 1) if last and it == iterations - 1 else _push(h, t, flags & ~1), groups)
 			cur = 1 - cur
+		_dispatch(cl, "rigid_solve", cur, p, MAX_PIECES)
 		_dispatch(cl, "finalize", cur, p, groups)
 		_dispatch(cl, "velocity", cur, p, groups)
 	rd.compute_list_end()
@@ -171,6 +225,10 @@ func read_positions() -> PackedVector2Array:
 
 func read_velocities() -> PackedVector2Array:
 	return _read_vec2("v")
+
+
+func read_floats(key: String, offset := 0, size := 0) -> PackedFloat32Array:
+	return rd.buffer_get_data(_buf[key], offset, size).to_float32_array()
 
 
 func read_radii() -> PackedFloat32Array:
@@ -224,7 +282,7 @@ func _sbuf(key: String, bytes: int, data := PackedByteArray()) -> void:
 
 func _make_set(shader: RID, p_in: String, p_out: String) -> RID:
 	var order := ["x", p_in, p_out, "v", "info", "color", "cell_count", "cell_items", "cell_of", "stats", "mat",
-		"", "rad", "bodies", "prims", "bonds", "stab", "vn", "vold"]
+		"", "rad", "bodies", "prims", "bonds", "stab", "vn", "vold", "rest", "body_of", "rb", "pieces", "fric"]
 	var us: Array[RDUniform] = []
 	for b in order.size():
 		var u := RDUniform.new()
@@ -249,7 +307,7 @@ func _dispatch(cl: int, kernel: String, variant: int, pc: PackedByteArray, group
 
 func _push(h: float, t_sub: float, flags: int) -> PackedByteArray:
 	var b := PackedByteArray()
-	b.resize(96)
+	b.resize(112)
 	b.encode_float(0, world.x)
 	b.encode_float(4, world.y)
 	b.encode_float(8, gravity.x)
@@ -270,8 +328,12 @@ func _push(h: float, t_sub: float, flags: int) -> PackedByteArray:
 	b.encode_float(68, sleep * radius)
 	b.encode_float(72, r_max)
 	b.encode_float(76, 0.0)
-	b.encode_float(80, laser_a.x)
-	b.encode_float(84, laser_a.y)
-	b.encode_float(88, laser_b.x)
-	b.encode_float(92, laser_b.y)
+	b.encode_u32(80, MAX_PIECES)
+	b.encode_float(84, crush * radius)
+	b.encode_float(88, kerf)
+	b.encode_float(92, 0.0)
+	b.encode_float(96, laser_a.x)
+	b.encode_float(100, laser_a.y)
+	b.encode_float(104, laser_b.x)
+	b.encode_float(108, laser_b.y)
 	return b

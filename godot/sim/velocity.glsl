@@ -29,7 +29,7 @@ void main() {
 	uint kind = kind_of(info);
 	if (kind == KIND_NONE) return;
 	vec2 vi = VN[i];
-	if (kind == KIND_SPARK) {
+	if (kind == KIND_SPARK || kind == KIND_RIGID) {
 		V[i] = vi;
 		return;
 	}
@@ -64,16 +64,12 @@ void main() {
 					float d0 = ri + rj + tol;
 					float d2 = dot(dv, dv);
 					if (d2 >= d0 * d0 || d2 < 1e-20) continue;
-					if (kind == KIND_BONDED && kj == KIND_BONDED) {
-						bool bonded = false;
-						for (uint k = 0u; k < MAX_BONDS; k++) bonded = bonded || BONDS[i * MAX_BONDS + k].x == j + 1u;
-						if (bonded) continue;
-					}
+					if (same_unit(i, j, kind, kj)) continue;
 					vec2 n = dv * inversesqrt(d2);
 					float vn = dot(vi - VN[j], n);
 					float vn0 = dot(vi0 - VOLD[j], n);
 					float e = 0.5 * (mi.z + MAT[2u * mat_of(infoj)].z);
-					float wj = inv_mass(infoj, rj);
+					float wj = particle_w(j, infoj, rj);
 					acc_add(a, n * ((restitution_target(vn0, e) - vn) * wi / (wi + wj)));
 				}
 			}

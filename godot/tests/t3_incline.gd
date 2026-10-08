@@ -1,5 +1,5 @@
 extends SimTest
-## T3: bonded block on a slope (gravity rotated by θ over a flat floor) stays put
+## T3: rigid bonded block (intact piece) on a slope (gravity rotated by θ over a flat floor) stays put
 ## iff tanθ < mu_s. θ = φ ± 2° with φ = atan(mu_s). Two independent solvers.
 
 var COLS := 10
@@ -19,7 +19,10 @@ func setup() -> void:
 		make_solver(256, Vector2(2.0, 0.3), int(args.get("sub", SimConst.SUBSTEPS)))
 		solver.gravity = SimConst.G * Vector2(sin(deg_to_rad(th)), -cos(deg_to_rad(th)))
 		var b := Spawn.bonded_block(COLS, ROWS, Vector2(0.2, 0.0), 1, Spawn.SORBET[solvers.size()], 7)
-		solver.write_set(0, b)
+		if args.get("rigid", "1") == "1":
+			solver.spawn_piece(0, 0, b, Vector2(0.2, 0.0), Vector2.ZERO)
+		else:
+			solver.write_set(0, b)
 		solvers.append(solver)
 		x0.append(_mean_x(b.x, b.size()))
 
@@ -54,9 +57,19 @@ func result() -> Dictionary:
 				idx += 1
 			rows.append(snappedf(m / cnt, 0.0001))
 		out["rows_x_%d" % k] = rows
+		# Block tilt from bottom-row end points.
+		var a0 := pos[0]
+		var a1 := pos[COLS - 1]
+		out["tilt_deg_%d" % k] = snappedf(rad_to_deg((a1 - a0).angle()), 0.01)
 		out["theta_%d" % k] = {"deg": snappedf(thetas[k], 0.01), "dx_m": snappedf(dx, 0.0001),
 			"expected_slide_m": snappedf(expect, 0.0001) if k == 1 else 0.0, "slides": slides,
 			"broken": s.read_stats().broken}
+	if args.get("dbg", "0") == "1":
+		var s1 := solvers[1]
+		out["rb"] = Array(s1.read_floats("rb", 0, 64))
+		var fr := s1.read_floats("fric", 0, 16 * 4)
+		out["fric0_3"] = Array(fr)
+		out["d_pen_bottom"] = s1.read_positions()[0].y - SimConst.R
 	out["pass"] = ok
 	return out
 

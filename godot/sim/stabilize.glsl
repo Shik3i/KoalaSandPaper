@@ -15,7 +15,7 @@ void main() {
 	if (i >= pc.n || pc.laser_b.x < -1e30) return;
 	uint info = INFO[i];
 	uint kind = kind_of(info);
-	if (kind == KIND_NONE || kind == KIND_SPARK || (pc.flags & FLAG_NOSTAB) != 0u) {
+	if (kind == KIND_NONE || kind == KIND_SPARK || kind == KIND_RIGID || (pc.flags & FLAG_NOSTAB) != 0u) {
 		STAB[i] = vec2(0.0);
 		return;
 	}
@@ -46,19 +46,15 @@ void main() {
 				if (d2 >= d0 * d0) continue;
 				uint infoj = INFO[j];
 				if (kind_of(infoj) == KIND_SPARK) continue;
-				if (kind == KIND_BONDED && kind_of(infoj) == KIND_BONDED) {
-					bool bonded = false;
-					for (uint k = 0u; k < MAX_BONDS; k++) bonded = bonded || BONDS[i * MAX_BONDS + k].x == j + 1u;
-					if (bonded) continue;
-				}
+				if (same_unit(i, j, kind, kind_of(infoj))) continue;
 				float dist = sqrt(d2);
 				vec2 n = dist > 1e-9 * pc.r ? dv / dist : vec2(0.0, i < j ? 1.0 : -1.0);
 				float wib = wi * exp(pc.stack_k * dv.y / pc.r);
-				acc_add(a, n * ((d0 - dist) * wib / (wib + inv_mass(infoj, rj))));
+				acc_add(a, n * ((d0 - dist) * wib / (wib + particle_w(j, infoj, rj))));
 			}
 		}
 	}
-	Surf su = Surf(xi + pc.omega * acc_total(a), vec2(0.0));
+	Surf su = Surf(xi + pc.omega * acc_total(a), vec2(0.0), false, vec4(0.0));
 	collider_contacts(pc.t_sub - pc.h, true, ri, mi, su);
 	world_walls(ri, vec4(0.0), su);
 	vec2 s = su.p - xi;
