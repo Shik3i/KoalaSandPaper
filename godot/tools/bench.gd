@@ -4,7 +4,7 @@ extends Node2D
 ## Prints one JSON line and quits.
 
 var solver: GpuSolver
-var args := {"n": 50000, "sub": 6, "it": 1, "frames": 600, "warm": 120, "stack": 0.0}
+var args := {"n": 50000, "sub": SimConst.SUBSTEPS, "it": 1, "frames": 600, "warm": 120, }
 var times: Array[float] = []
 var last_us := 0
 
@@ -22,15 +22,10 @@ func _ready() -> void:
 	solver = GpuSolver.new()
 	solver.substeps = args.sub
 	solver.iterations = args.it
-	solver.stack_k = args.stack
-	solver.split_lists = args.get("split", 0) == 1
-	solver.setup(args.n, world, r)
+	solver.stack_k = args.get("stack", SimConst.STACK_K)
+	solver.setup(args.n, world)
 	var cols := int(wc * 0.78)
-	var s := Spawn.block(args.n, Vector2(wc * 0.11, wc * 9 / 16 * 0.38) * 2.0 * r, cols, r, 0.05, 0.1, 1)
-	var v := PackedVector2Array()
-	v.resize(args.n)
-	var info := PackedInt32Array(Spawn.fill(args.n, GpuSolver.info_word(1, 0)))
-	solver.upload(s.x, v, info, s.color)
+	solver.write_set(0, Spawn.block(args.n, Vector2(wc * 0.11, wc * 9 / 16 * 0.38) * 2.0 * r, cols, 1))
 	var view := ParticleView.new()
 	add_child(view)
 	view.bind(solver, get_viewport_rect().size.x / world.x)
@@ -55,7 +50,7 @@ func _report() -> void:
 	var st := solver.read_stats()
 	if args.get("probe", 0) == 1:
 		var pos := solver.read_positions()
-		st["cpu"] = Probe.overlap(pos, solver.radius)
+		st["cpu"] = Probe.overlap(pos, solver.read_radii())
 		var e := Probe.extent(pos)
 		st["top_r"] = snappedf(e.end.y / solver.radius, 0.1)
 		var vel := solver.read_velocities()

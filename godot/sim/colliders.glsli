@@ -1,0 +1,67 @@
+// Analytic SDF machine colliders (kinematic bodies with primitives).
+// Requires common.glsli.
+
+void body_pose(uint b, float t, out vec2 pos, out float ang, out vec2 vel, out float om) {
+	vec4 p = BODY[2u * b];
+	vec4 v = BODY[2u * b + 1u];
+	vel = v.xy;
+	om = v.z;
+	pos = p.xy + v.xy * t;
+	ang = p.z + v.z * t;
+}
+
+// q is in the body's local frame.
+float prim_sdf(Prim pr, vec2 q) {
+	if (pr.head.z > 1u) {
+		float sector = 6.28318530718 / float(pr.head.z);
+		float k = round((atan(q.y, q.x) - pr.xf.w) / sector);
+		q = rot(-k * sector) * q;
+	}
+	q = rot(-pr.xf.z) * (q - pr.xf.xy);
+	float d;
+	uint type = pr.head.x;
+	if (type == PRIM_CIRCLE) {
+		d = length(q) - pr.shape.x;
+	} else if (type == PRIM_CAPSULE) {
+		q.x -= clamp(q.x, -pr.shape.x, pr.shape.x);
+		d = length(q) - pr.shape.y;
+	} else if (type == PRIM_BOX) {
+		vec2 e = abs(q) - pr.shape.xy + pr.shape.z;
+		d = length(max(e, 0.0)) + min(max(e.x, e.y), 0.0) - pr.shape.z;
+	} else {
+		// Arc symmetric about local +y, radius ra, half thickness rb, half aperture shape.z.
+		vec2 sc = vec2(sin(pr.shape.z), cos(pr.shape.z));
+		q.x = abs(q.x);
+		d = ((sc.y * q.x > sc.x * q.y) ? length(q - sc * pr.shape.x) : abs(length(q) - pr.shape.x)) - pr.shape.y;
+	}
+	return (pr.head.w & 1u) != 0u ? -d : d;
+}
+
+// t: pose time (substep end for the solve, substep start for stabilisation).
+// stab: position-only push-out, no friction, no surface motion.
+void collider_contacts(float t, bool stab, float rad, vec4 mi, inout Surf su) {
+	for (uint k = 0u; k < pc.n_prims; k++) {
+		Prim pr = PRIMS[k];
+		if ((pr.head.w & 6u) != 0u) continue;  // sink zone or visual-only: no collision
+		vec2 bpos, bvel;
+		float bang, bom;
+		body_pose(pr.head.y, t, bpos, bang, bvel, bom);
+		vec2 rp = su.p - bpos;
+		if ((pr.head.w & 1u) == 0u && dot(rp, rp) > (pr.surf.z + rad) * (pr.surf.z + rad)) continue;
+		vec2 q = rot(-bang) * rp;
+		float d = prim_sdf(pr, q);
+		if (d >= rad) continue;
+		float e = 0.05 * rad;
+		vec2 g = vec2(prim_sdf(pr, q + vec2(e, 0.0)) - prim_sdf(pr, q - vec2(e, 0.0)),
+				prim_sdf(pr, q + vec2(0.0, e)) - prim_sdf(pr, q - vec2(0.0, e)));
+		float gl = length(g);
+		if (gl < 1e-12) continue;
+		vec2 n = rot(bang) * (g / gl);
+		if (stab) {
+			su.p += n * (rad - d);
+			continue;
+		}
+		vec2 vs = bvel + bom * vec2(-rp.y, rp.x) + pr.surf.w * vec2(n.y, -n.x);
+		surface_contact(n, rad - d, vs * pc.h, 0.5 * (mi.x + pr.surf.x), 0.5 * (mi.y + pr.surf.y), su);
+	}
+}

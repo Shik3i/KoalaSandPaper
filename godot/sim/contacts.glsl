@@ -1,25 +1,46 @@
 #[compute]
 #version 450
-// One Jacobi pass of particle-particle and particle-wall contacts with Coulomb
-// friction. Reads P_IN, writes P_OUT (averaged corrections, Macklin 2014).
+// One Jacobi pass: particle contacts (Coulomb friction), bonds (XPBD distance,
+// break on strain), machine colliders, world box. Reads D_IN, writes D_OUT
+// with averaged corrections (Macklin 2014).
 #include "common.glsli"
+#include "colliders.glsli"
 layout(local_size_x = WG) in;
+
+bool segments_cross(vec2 p1, vec2 p2, vec2 q1, vec2 q2) {
+	vec2 r = p2 - p1, s = q2 - q1;
+	float den = r.x * s.y - r.y * s.x;
+	if (abs(den) < 1e-14) return false;
+	vec2 w = q1 - p1;
+	float t = (w.x * s.y - w.y * s.x) / den;
+	float u = (w.x * r.y - w.y * r.x) / den;
+	return t >= 0.0 && t <= 1.0 && u >= 0.0 && u <= 1.0;
+}
+
+// Intact bond i–j: the bond owns that pair, no contact constraint on top.
+bool bonded_to(uint i, uint j) {
+	for (uint k = 0u; k < MAX_BONDS; k++) {
+		if (BONDS[i * MAX_BONDS + k].x == j + 1u) return true;
+	}
+	return false;
+}
 
 void main() {
 	uint i = gl_GlobalInvocationID.x;
 	if (i >= pc.n) return;
 	uint info = INFO[i];
-	if (kind_of(info) == KIND_NONE) return;
-	vec2 pi = P_IN[i];
-	vec2 dxi = pi - X[i];
-	vec4 mi = MAT[mat_of(info)];
-	float wi = mi.w;
-	float d0 = 2.0 * pc.r;
-	vec2 acc = vec2(0.0);
-	float cnt = 0.0;
+	uint kind = kind_of(info);
+	if (kind == KIND_NONE) return;
+	vec2 xi = X[i] + STAB[i];
+	vec2 dxi = D_IN[i];
+	vec2 pi = xi + dxi;
+	float ri = RAD[i];
+	vec4 mi = MAT[2u * mat_of(info)];
+	float wi = inv_mass(info, ri);
+	Acc a = Acc(vec2(0.0), 0.0, 0.0);
 	float max_pen = 0.0;
 
-	uint c = CELL_OF[i];
+	uint c = cell_of(i);
 	int cx = int(c % pc.grid_w);
 	int cy = int(c / pc.grid_w);
 	for (int oy = -1; oy <= 1; oy++) {
@@ -29,47 +50,66 @@ void main() {
 			int x = cx + ox;
 			if (x < 0 || x >= int(pc.grid_w)) continue;
 			uint cell = uint(y) * pc.grid_w + uint(x);
-			uint m = min(CELL_COUNT[cell], CELL_CAP);
+			uint m = count_at(cell);
 			for (uint s = 0u; s < m; s++) {
 				uint j = CELL_ITEMS[cell * CELL_CAP + s];
 				if (j == i) continue;
-				vec2 pj = P_IN[j];
-				vec2 dv = pi - pj;
+				vec2 dxj = D_IN[j];
+				vec2 xj = X[j] + STAB[j];
+				vec2 dv = (xi - xj) + (dxi - dxj);
+				float rj = RAD[j];
+				float d0 = ri + rj;
 				float d2 = dot(dv, dv);
 				if (d2 >= d0 * d0) continue;
+				uint infoj = INFO[j];
+				if (kind_of(infoj) == KIND_SPARK || kind == KIND_SPARK) continue;
+				if (kind == KIND_BONDED && kind_of(infoj) == KIND_BONDED && bonded_to(i, j)) continue;
 				float dist = sqrt(d2);
 				vec2 n = dist > 1e-9 * pc.r ? dv / dist : vec2(0.0, i < j ? 1.0 : -1.0);
 				float pen = d0 - dist;
-				uint infoj = INFO[j];
-				vec4 mj = MAT[mat_of(infoj)];
+				vec4 mj = MAT[2u * mat_of(infoj)];
 				// Shock propagation: the lower particle acts heavier.
-				float b = exp(pc.stack_k * (pi.y - pj.y) / pc.r);
-				float wsum = wi * b + mj.w;
-				if (wsum <= 0.0) continue;
-				float s_i = wi * b / wsum;
-				vec2 rel = dxi - (pj - X[j]);
-				vec2 t = rel - dot(rel, n) * n;
-				float tl = length(t);
-				float mu_s = 0.5 * (mi.x + mj.x);
-				float mu_k = 0.5 * (mi.y + mj.y);
-				vec2 corr = n * pen;
-				if (tl > 0.0) {
-					corr -= (tl < mu_s * pen) ? t : t * min(mu_k * pen / tl, 1.0);
-				}
-				acc += corr * s_i;
-				cnt += 1.0;
-				max_pen = max(max_pen, pen);
+				float b = exp(pc.stack_k * dv.y / pc.r);
+				float wib = wi * b;
+				float s_i = wib / (wib + inv_mass(infoj, rj));
+				acc_add(a, s_i * (n * pen + friction(n, pen, dxi - dxj, 0.5 * (mi.x + mj.x), 0.5 * (mi.y + mj.y))));
+				max_pen = max(max_pen, pen / min(ri, rj));
 			}
 		}
 	}
 
-	// World box walls (static).
-	float r = pc.r;
-	if (pi.y < r) surface_contact(vec2(0.0, 1.0), r - pi.y, dxi, mi.x, mi.y, acc, cnt);
-	if (pi.y > pc.world.y - r) surface_contact(vec2(0.0, -1.0), pi.y - (pc.world.y - r), dxi, mi.x, mi.y, acc, cnt);
-	if (pi.x < r) surface_contact(vec2(1.0, 0.0), r - pi.x, dxi, mi.x, mi.y, acc, cnt);
-	if (pi.x > pc.world.x - r) surface_contact(vec2(-1.0, 0.0), pi.x - (pc.world.x - r), dxi, mi.x, mi.y, acc, cnt);
+	if (kind == KIND_BONDED) {
+		vec4 mb = MAT[2u * mat_of(info) + 1u];
+		float alpha = mb.x / (pc.h * pc.h);
+		bool laser = any(notEqual(pc.laser_a, pc.laser_b));
+		for (uint k = 0u; k < MAX_BONDS; k++) {
+			uvec2 bd = BONDS[i * MAX_BONDS + k];
+			if (bd.x == 0u || (bd.x & 0x80000000u) != 0u) continue;
+			uint j = bd.x - 1u;
+			float rest = uintBitsToFloat(bd.y);
+			vec2 dv = (xi - X[j] - STAB[j]) + (dxi - D_IN[j]);
+			float dist = length(dv);
+			float C = dist - rest;
+			bool cut = laser && segments_cross(pi, pi - dv, pc.laser_a, pc.laser_b);
+			if (abs(C) > mb.y * rest || cut || kind_of(INFO[j]) == KIND_NONE) {
+				BONDS[i * MAX_BONDS + k].x = bd.x | 0x80000000u;
+				atomicAdd(STATS[ST_BROKEN], 1u);
+				continue;
+			}
+			if (dist < 1e-12) continue;
+			float wj = inv_mass(INFO[j], RAD[j]);
+			acc_add(a, (-C * wi / (wi + wj + alpha)) * (dv / dist));
+		}
+	}
 
-	if ((pc.flags & FLAG_LAST) != 0u) atomic_max_f(ST_MAX_PEN, max_pen / r);
-	P_OUT[i] = cnt > 0.0 ? pi + acc * (pc.omega / cnt) : pi;
+	// Stage 2: immovable/kinematic surfaces see the displacement after particle
+	// and bond corrections, so loads transmitted through bonds/contacts within
+	// this pass are subject to static friction (and never push through walls).
+	vec2 d1 = dxi + pc.omega * acc_total(a);
+	Surf su = Surf(xi + d1, d1);
+	if (kind != KIND_SPARK) collider_contacts(pc.t_sub, false, ri, mi, su);
+	world_walls(ri, mi, su);
+
+	if ((pc.flags & FLAG_LAST) != 0u) atomic_max_f(ST_MAX_PEN, max_pen);
+	D_OUT[i] = su.d;
 }

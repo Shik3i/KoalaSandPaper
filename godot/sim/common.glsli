@@ -1,8 +1,12 @@
 // Shared layout for all solver kernels. SI units (m, s, kg); y points up.
+// The neighbour grid is double-buffered by substep parity: CELL_COUNT and CELL_OF
+// hold two halves; the velocity pass clears the other parity's cells, which no
+// kernel reads during this substep (no clear/read race).
 
 #define WG 256
 #define CELL_CAP 8u
 #define TEX_W 1024u
+#define MAX_BONDS 6u
 
 #define KIND_NONE 0u
 #define KIND_GRAIN 1u
@@ -10,6 +14,9 @@
 #define KIND_SPARK 3u
 
 #define FLAG_LAST 1u
+// bit 1: no pre-stabilisation; bit 2: grid parity of this substep.
+#define FLAG_PARITY 4u
+#define CELL_NONE 0xffffffffu
 
 #define ST_CLAMP 0
 #define ST_OVERFLOW 1
@@ -17,11 +24,24 @@
 #define ST_OOB 3
 #define ST_MAX_PEN 4
 #define ST_MAX_SPEED 5
+#define ST_BROKEN 6
+#define ST_SUNK 7
+// 8..11 per-sink counters; 12/13 last clamp position, 14/15 last overflow position (debug).
+#define ST_CLAMP_POS 12
+#define ST_OVF_POS 14
+
+#define PRIM_CIRCLE 0u
+#define PRIM_CAPSULE 1u
+#define PRIM_BOX 2u
+#define PRIM_ARC 3u
 
 layout(set = 0, binding = 0, std430) restrict buffer XBuf { vec2 X[]; };
-layout(set = 0, binding = 1, std430) restrict buffer PInBuf { vec2 P_IN[]; };
-layout(set = 0, binding = 2, std430) restrict buffer POutBuf { vec2 P_OUT[]; };
+// Substep displacement (predicted position = X + D). Kept separate from X so
+// velocity D/h does not lose precision to float32 rounding of positions.
+layout(set = 0, binding = 1, std430) restrict buffer DInBuf { vec2 D_IN[]; };
+layout(set = 0, binding = 2, std430) restrict buffer DOutBuf { vec2 D_OUT[]; };
 layout(set = 0, binding = 3, std430) restrict buffer VBuf { vec2 V[]; };
+// bits 0-7 material, 8-15 kind.
 layout(set = 0, binding = 4, std430) restrict buffer InfoBuf { uint INFO[]; };
 // Packed 0xRRGGBB (24 bit, exact as float in the render texture).
 layout(set = 0, binding = 5, std430) restrict buffer ColorBuf { uint COLOR[]; };
@@ -29,17 +49,38 @@ layout(set = 0, binding = 6, std430) restrict buffer CellCountBuf { uint CELL_CO
 layout(set = 0, binding = 7, std430) restrict buffer CellItemsBuf { uint CELL_ITEMS[]; };
 layout(set = 0, binding = 8, std430) restrict buffer CellOfBuf { uint CELL_OF[]; };
 layout(set = 0, binding = 9, std430) restrict buffer StatsBuf { uint STATS[]; };
-// Per material: x = mu_static, y = mu_kinetic, z = restitution, w = inverse mass.
+// Per material two vec4: [2m] = (mu_s, mu_k, restitution, inv_mass_ref),
+// [2m+1] = (bond_compliance, break_strain, density, 0). Mass scales with r^3.
 layout(set = 0, binding = 10, std430) restrict readonly buffer MatBuf { vec4 MAT[]; };
 layout(set = 0, binding = 11, rgba32f) uniform restrict writeonly image2D RENDER_IMG;
+layout(set = 0, binding = 12, std430) restrict readonly buffer RadBuf { float RAD[]; };
+// Kinematic bodies: [2b] = (pos.x, pos.y, angle, 0) at frame start, [2b+1] = (vel.x, vel.y, omega, 0).
+layout(set = 0, binding = 13, std430) restrict readonly buffer BodyBuf { vec4 BODY[]; };
+struct Prim {
+	uvec4 head;   // type, body, polar repeat count, flags (1 = inverted)
+	vec4 xf;      // local offset.xy, local angle, repeat phase
+	vec4 shape;   // circle: R | capsule: half_len, R | box: hx, hy, corner | arc: ra, rb, half_aperture
+	vec4 surf;    // mu_s, mu_k, aabb radius (from body origin), surface speed (belts, along n rotated -90°)
+};
+layout(set = 0, binding = 14, std430) restrict readonly buffer PrimBuf { Prim PRIMS[]; };
+// Per particle MAX_BONDS slots: x = partner + 1 (0 = empty), bit 31 = broken; y = rest length bits.
+layout(set = 0, binding = 15, std430) restrict buffer BondBuf { uvec2 BONDS[]; };
+// Pre-stabilisation shift of this substep (Macklin et al. 2014, §4.4): overlap
+// present at the substep start is removed by moving X itself, so it never turns
+// into velocity. Effective start position = X + STAB.
+layout(set = 0, binding = 16, std430) restrict buffer StabBuf { vec2 STAB[]; };
+// Velocity pass (XPBD, Müller et al. 2020 §3.6): VN = velocity from the position
+// solve, VOLD = velocity at the substep start; the pass writes the final V.
+layout(set = 0, binding = 17, std430) restrict buffer VNBuf { vec2 VN[]; };
+layout(set = 0, binding = 18, std430) restrict buffer VOldBuf { vec2 VOLD[]; };
 
 layout(push_constant, std430) uniform Params {
 	vec2 world;
 	vec2 gravity;
 	float h;
-	float r;
-	float inv_cell;
-	float max_step;
+	float r;        // reference radius (mean)
+	float inv_cell; // 1 / (2 r_max)
+	float max_step; // 0.5 r
 	uint n;
 	uint grid_w;
 	uint grid_h;
@@ -47,11 +88,27 @@ layout(push_constant, std430) uniform Params {
 	float damp;     // velocity factor per substep
 	float stack_k;  // shock-propagation strength (0 = off)
 	float omega;    // Jacobi relaxation
+	float t_sub;    // time of this substep's end, relative to frame start
+	uint n_prims;
+	float sleep;    // displacement below which a particle keeps its position (m/substep)
+	float r_max;
 	float pad0;
+	vec2 laser_a;   // laser beam segment (a == b: off); cuts every bond crossing it
+	vec2 laser_b;
 } pc;
 
 uint kind_of(uint info) { return (info >> 8u) & 0xffu; }
 uint mat_of(uint info) { return info & 0xffu; }
+
+float inv_mass(uint info, float rad) {
+	float s = pc.r / rad;
+	return MAT[2u * mat_of(info)].w * s * s * s;
+}
+
+uint par() { return (pc.flags & FLAG_PARITY) != 0u ? 1u : 0u; }
+uint cells_total() { return pc.grid_w * pc.grid_h; }
+uint count_at(uint cell) { return min(CELL_COUNT[par() * cells_total() + cell], CELL_CAP); }
+uint cell_of(uint i) { return CELL_OF[par() * pc.n + i]; }
 
 uvec2 cell_coord(vec2 p) {
 	ivec2 c = ivec2(floor(p * pc.inv_cell));
@@ -63,16 +120,58 @@ void atomic_max_f(int slot, float v) {
 	atomicMax(STATS[slot], floatBitsToUint(max(v, 0.0)));
 }
 
-// Contact with an immovable (or kinematic) surface: normal n, penetration pen,
-// relative tangential displacement source rel = particle motion - surface motion.
-void surface_contact(vec2 n, float pen, vec2 rel, float mu_s, float mu_k,
-		inout vec2 acc, inout float cnt) {
-	vec2 corr = n * pen;
+mat2 rot(float a) {
+	float c = cos(a), s = sin(a);
+	return mat2(c, s, -s, c);
+}
+
+// Jacobi accumulator. Corrections are averaged with an effective count
+// N = sum|c| / max|c| (>= 1): constraints that propose nothing do not dilute
+// the others (plain averaging made friction creep), redundant ones still damp.
+struct Acc {
+	vec2 sum;
+	float mag;
+	float peak;
+};
+
+void acc_add(inout Acc a, vec2 c) {
+	float m = length(c);
+	a.sum += c;
+	a.mag += m;
+	a.peak = max(a.peak, m);
+}
+
+vec2 acc_total(Acc a) {
+	return a.peak > 0.0 ? a.sum * (a.peak / a.mag) : vec2(0.0);
+}
+
+// Coulomb friction for one contact (Macklin 2014, eq. 24): tangential part of
+// rel, cancelled fully inside the static cone, limited to mu_k * pen outside.
+vec2 friction(vec2 n, float pen, vec2 rel, float mu_s, float mu_k) {
 	vec2 t = rel - dot(rel, n) * n;
 	float tl = length(t);
-	if (tl > 0.0) {
-		corr -= (tl < mu_s * pen) ? t : t * min(mu_k * pen / tl, 1.0);
-	}
-	acc += corr;
-	cnt += 1.0;
+	if (tl <= 0.0) return vec2(0.0);
+	return (tl < mu_s * pen) ? -t : -t * min(mu_k * pen / tl, 1.0);
+}
+
+// Immovable/kinematic surfaces are a separate constraint group applied after
+// particles and bonds, projected sequentially (Gauss-Seidel): corners resolve
+// exactly and pile pressure can never push a grain inside.
+struct Surf {
+	vec2 p;  // current position
+	vec2 d;  // current displacement (friction acts on d - surface displacement)
+};
+
+void surface_contact(vec2 n, float pen, vec2 surf_disp, float mu_s, float mu_k, inout Surf s) {
+	vec2 c = n * pen + friction(n, pen, s.d - surf_disp, mu_s, mu_k);
+	s.p += c;
+	s.d += c;
+}
+
+void world_walls(float ri, vec4 mi, inout Surf su) {
+	vec2 hi = pc.world - ri;
+	if (su.p.y < ri) surface_contact(vec2(0.0, 1.0), ri - su.p.y, vec2(0.0), mi.x, mi.y, su);
+	if (su.p.y > hi.y) surface_contact(vec2(0.0, -1.0), su.p.y - hi.y, vec2(0.0), mi.x, mi.y, su);
+	if (su.p.x < ri) surface_contact(vec2(1.0, 0.0), ri - su.p.x, vec2(0.0), mi.x, mi.y, su);
+	if (su.p.x > hi.x) surface_contact(vec2(-1.0, 0.0), su.p.x - hi.x, vec2(0.0), mi.x, mi.y, su);
 }

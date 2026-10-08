@@ -5,11 +5,12 @@ render_mode skip_vertex_transform, unshaded;
 uniform sampler2D state_tex : filter_nearest;
 uniform float px_per_m = 100.0;
 uniform float world_h = 7.2;
-uniform float radius_px = 2.0;
+uniform float ref_d_px = 4.0; // 2R in px; w = kind + radius / 2R
 uniform vec3 light_dir = vec3(-0.45, 0.6, 0.66);
 
 varying vec3 tint;
 varying vec2 local;
+varying float radius_px;
 
 void vertex() {
 	vec4 s = texelFetch(state_tex, ivec2(INSTANCE_ID % 1024, INSTANCE_ID / 1024), 0);
@@ -18,6 +19,7 @@ void vertex() {
 	local = UV * 2.0 - 1.0;
 	vec2 c = vec2(s.x, world_h - s.y) * px_per_m;
 	// +0.5 px padding so the anti-aliased edge is not clipped.
+	radius_px = fract(s.w) * ref_d_px;
 	VERTEX = s.w < 0.5 ? vec2(-1e6) : c + local * (radius_px + 0.5);
 }
 
