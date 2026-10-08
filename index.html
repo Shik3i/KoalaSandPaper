@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#f4f2ed">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; worker-src 'self' blob:; connect-src 'self'; media-src 'self' blob:; object-src 'none'; base-uri 'none'">
+  <title>KoalaSandPaper — Kinetic sand studio</title>
+  <link rel="icon" href="./icon.svg" type="image/svg+xml"><link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <header class="topbar"><a class="brand" href="./" aria-label="KoalaSandPaper Start"><span class="brandmark">≋</span><span>koala<span class="light">sandpaper</span><small>KINETIC SAND STUDIO</small></span></a><div class="header-right"><span class="local"><i></i> Lokal. Endlos. Entspannt.</span><button id="zen" class="quiet">↗ &nbsp; Zen-Modus <kbd>Z</kbd></button></div></header>
+  <main>
+    <section class="intro"><div><div class="eyebrow">EIN KLEINER MOMENT RUHE</div><h1>Alles kommt ins Fließen<span>.</span></h1><p>Formen werden zu Sand. Gedanken werden leiser.</p></div><div class="edition"><span>STUDIE</span><strong>001</strong><span>THE SOFT FACTORY</span></div></section>
+    <div class="studio">
+      <section class="preview" aria-label="Live-Sandsimulation">
+        <div class="stage-bar"><span><i class="live-dot"></i><span id="live-label">LIVE SIMULATION</span></span><span id="fps">WIRD GELADEN</span></div>
+        <canvas id="scene" width="1536" height="864" aria-label="Förderband mit bunten Formen, Laser, Mahlwerk, Mixer und fließendem Sand"></canvas>
+        <div class="transport"><div><button id="pause" class="play" aria-label="Simulation pausieren">Ⅱ</button><button id="reset" class="icon" aria-label="Simulation neu starten" title="Gleichen Seed neu starten">↻</button><span class="separator"></span><span class="scene-name">The soft factory<small>Ein endloser Kreislauf</small></span></div><div><span id="time">00:00</span><button id="fullscreen" class="icon" aria-label="Vollbild" title="Vollbild">⛶</button></div></div>
+      </section>
+      <aside class="controls" aria-label="Studio-Einstellungen">
+        <div class="panel-heading"><span class="eyebrow">DEIN FLOW</span><span class="tiny-mark">✳</span></div>
+        <h2>Einfach treiben lassen.</h2>
+        <label class="field-label" for="preset">Atmosphäre</label>
+        <div class="presets" id="preset"><button data-preset="ritual" aria-pressed="true"><span>◌</span>Sanft</button><button data-preset="flow" aria-pressed="false"><span>≋</span>Fließend</button><button data-preset="energy" aria-pressed="false"><span>✳</span>Lebhaft</button></div>
+        <div class="label-row"><label for="speed">Tempo</label><output id="speed-value">1×</output></div><input id="speed" type="range" min="0.25" max="2" step="0.25" value="1"><div class="range-labels"><span>ZEITLUPE</span><span>IM FLOW</span></div>
+        <div class="field-label">Sandfarben <span id="palette-name">Sorbet</span></div>
+        <div class="palettes"><button data-palette="sorbet" class="swatch sorbet" aria-label="Farbpalette Sorbet" aria-pressed="true"></button><button data-palette="aurora" class="swatch aurora" aria-label="Farbpalette Aurora" aria-pressed="false"></button><button data-palette="ember" class="swatch ember" aria-label="Farbpalette Abendglut" aria-pressed="false"></button></div>
+        <div class="machines"><label><span>Formen nachfüllen</span><input id="feed" type="checkbox" checked role="switch"></label><label><span>Laserschnitt</span><input id="cutter" type="checkbox" checked role="switch"></label><label><span>Mixer</span><input id="mixer" type="checkbox" checked role="switch"></label></div>
+        <div class="seed-row"><label for="seed">Dein Seed</label><input id="seed" type="number" value="2718" min="0" max="2147483647" step="1"><button id="reseed" aria-label="Neuen Seed anwenden">↵</button></div>
+        <button id="record" class="primary"><span>◉</span> Video aufnehmen <span>↗</span></button><p class="capture-note" id="capture-note">30 Sekunden · 1536 × 864 · ohne Ton</p>
+        <button id="wallpaper" class="wallpaper">▧ &nbsp; Als Live-Hintergrund</button>
+      </aside>
+    </div>
+    <footer><span><span class="footer-star">✳</span> Kleine Körner. Große Ruhe.</span><span id="stats">Deterministische Sandphysik · KoalaSand</span><span>KEIN ZIEL. NUR BEWEGUNG.</span></footer>
+  </main>
+  <button id="exit-zen" class="quiet">↙ Studio öffnen <kbd>Z</kbd></button>
+  <div id="toast" role="status"></div>
+  <dialog id="wallpaper-dialog"><button id="close-dialog" class="dialog-close" aria-label="Dialog schließen">×</button><div class="eyebrow">EIN BISSCHEN RUHE AUF DEM DESKTOP</div><h2>Dein Flow als Hintergrund.</h2><p><strong>Windows · Lively Wallpaper</strong><br>Importiere <code>release/KoalaSandPaper-Lively.zip</code> in Lively. Die Simulation läuft lokal und ohne Studio-Bedienfelder.</p><p><strong>macOS</strong><br>Die Desktop-App funktioniert regulär. Ein nativer Live-Hintergrund ist technisch möglich, in dieser Version aber noch nicht integriert.</p><p>Den reinen Hintergrund kannst du hier direkt ansehen.</p><button id="preview-wallpaper" class="primary">Hintergrund ansehen ↗</button></dialog>
+  <script src="./app.js" defer></script>
+</body></html>

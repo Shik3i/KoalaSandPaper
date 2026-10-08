@@ -1,0 +1,5 @@
+{
+ "speed":{"type":"slider","min":0.25,"max":2,"step":0.25,"value":1,"text":"Tempo"},
+ "palette":{"type":"dropdown","value":0,"text":"Sandfarben","items":["Sorbet","Aurora","Abendglut"]},
+ "paused":{"type":"checkbox","value":false,"text":"Pause"}
+}

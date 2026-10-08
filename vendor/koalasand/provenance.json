@@ -1,0 +1,10 @@
+{
+  "repository": "https://github.com/Shik3i/KoalaSand",
+  "commit": "99cedca40f487af84d8bfd0d950af3918535259e",
+  "scope": "Phase-1 granular reference + 31-bit deterministic hash. Not full NativeSandWorld.",
+  "files": {
+    "granular_simulator.gd": "4b79e12d62709affa88156d1cc992273987b957426f614212954578ebcc54f35",
+    "deterministic_hash.gd": "f131c1fef0a2ca43d2783d7129a874a02dbe073926487588180eeee4f801d8a8",
+    "LICENSE": "142cd5e1814d2bf3907f31a963d61e9e5fe3a9a4557f7849a5062a15b405bcae"
+  }
+}
