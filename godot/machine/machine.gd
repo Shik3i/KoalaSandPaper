@@ -16,6 +16,8 @@ const MU := Vector2(0.6249, 0.5317)
 ## Coarse collider grid (CPU-built per frame): cell size and max prims per cell.
 const PCELL := 0.4
 const PCELL_CAP := 31
+## Smallest grain diameter is 2·0.9·R = 9 mm: narrower gaps are seals, not pinches.
+const SEAL := 0.008
 
 ## {pos, angle, vel, omega, name, motion: Dictionary, home, home_angle}
 var bodies: Array[Dictionary] = []
@@ -44,6 +46,19 @@ func rotor(body: int, omega: float, ramp := 2.0) -> void:
 ## Piston: home + axis * stroke * (1 - cos(2πt/period + phase)) / 2.
 func piston(body: int, axis: Vector2, stroke: float, period: float, phase := 0.0) -> void:
 	bodies[body].motion = {"kind": "piston", "axis": axis.normalized(), "stroke": stroke, "period": period, "phase": phase}
+
+
+## Piston that never stops: x = (1 - cos θ) / 2 with θ = τ + a sin τ, τ = 2πt/T.
+## a ≠ 0 makes it run slower on one side (|a| < 1 keeps it moving).
+func piston_swept(body: int, axis: Vector2, stroke: float, period: float, a: float) -> void:
+	bodies[body].motion = {"kind": "swept", "axis": axis.normalized(), "stroke": stroke, "period": period, "a": a}
+
+
+## Ram with dwell: waits at home + axis*stroke for `dwell` of the period, sweeps
+## to home in `sweep`, returns in the rest (cosine eased).
+func ram(body: int, axis: Vector2, stroke: float, period: float, dwell: float, sweep: float) -> void:
+	bodies[body].motion = {"kind": "ram", "axis": axis.normalized(), "stroke": stroke, "period": period,
+		"dwell": dwell, "sweep": sweep}
 
 
 ## Pendulum flap between ±amp (rad) with plateaus (sharpness k), period in s.
@@ -100,24 +115,29 @@ static func loop_pose(p0: Vector2, p1: Vector2, rr: float, s: float) -> Array:
 
 
 static func chain_length(bottom: Vector2, top: Vector2, rs: float) -> float:
-	return 2.0 * (top.y - bottom.y) + TAU * rs
+	return 2.0 * bottom.distance_to(top) + TAU * rs
 
 
-## Point on the loop at arc length s (0 = top of the left strand, going down).
+## Point on the loop around sprockets `bottom` and `top` (any inclination) at arc
+## length s. s = 0 is the top end of the left strand (side -n, n = axis rotated
+## -90°), increasing s runs down the left strand, around the bottom sprocket,
+## up the right strand and over the top (counter-clockwise).
 static func chain_point(bottom: Vector2, top: Vector2, rs: float, s: float) -> Vector2:
-	var hgt := top.y - bottom.y
+	var hgt := bottom.distance_to(top)
+	var u := (top - bottom) / hgt
+	var n := Vector2(u.y, -u.x)
 	var l := 2.0 * hgt + TAU * rs
 	s = fposmod(s, l)
 	if s < hgt:
-		return Vector2(top.x - rs, top.y - s)
+		return top - n * rs - u * s
 	s -= hgt
 	if s < PI * rs:
-		return bottom + Vector2.from_angle(PI + s / rs) * rs
+		return bottom + (-n).rotated(s / rs) * rs
 	s -= PI * rs
 	if s < hgt:
-		return Vector2(bottom.x + rs, bottom.y + s)
+		return bottom + n * rs + u * s
 	s -= hgt
-	return top + Vector2.from_angle(s / rs) * rs
+	return top + n.rotated(s / rs) * rs
 
 
 ## shape: circle [R] | capsule [half_len, R] | box [hx, hy, corner] | arc [ra, rb, half_aperture]
@@ -188,6 +208,18 @@ func pose(b: Dictionary, t: float) -> Array:
 		"piston":
 			var ph: float = TAU * t / m.period + m.phase
 			return [b.home + m.axis * m.stroke * (1.0 - cos(ph)) * 0.5, b.home_angle]
+		"swept":
+			var tau: float = TAU * t / m.period
+			var th: float = tau + m.a * sin(tau)
+			return [b.home + m.axis * m.stroke * (1.0 - cos(th)) * 0.5, b.home_angle]
+		"ram":
+			var ph: float = fposmod(t / m.period, 1.0)
+			var x := 1.0
+			if ph >= m.dwell and ph < m.dwell + m.sweep:
+				x = 0.5 + 0.5 * cos(PI * (ph - m.dwell) / m.sweep)
+			elif ph >= m.dwell + m.sweep:
+				x = 0.5 - 0.5 * cos(PI * (ph - m.dwell - m.sweep) / (1.0 - m.dwell - m.sweep))
+			return [b.home + m.axis * m.stroke * x, b.home_angle]
 		"flap":
 			var k: float = m.k
 			return [b.home, b.home_angle + m.amp * tanh(k * sin(TAU * t / m.period)) / tanh(k)]
@@ -299,10 +331,10 @@ func upload(solver: GpuSolver) -> void:
 
 
 ## CPU mirror of colliders.glsli prim_sdf (spawn placement, tests).
-func sdf(p: Vector2) -> float:
+func sdf(p: Vector2, static_only := false) -> float:
 	var best := INF
 	for pr in prims:
-		if pr.flags & (FLAG_SINK | FLAG_VISUAL | FLAG_HEAT):
+		if pr.flags & (FLAG_SINK | FLAG_VISUAL | FLAG_HEAT) or (static_only and pr.body != 0):
 			continue
 		var q: Vector2 = body_xform(pr.body).affine_inverse() * p
 		if pr.repeat > 1:
@@ -329,3 +361,68 @@ func sdf(p: Vector2) -> float:
 			d = -d
 		best = minf(best, d)
 	return best
+
+
+## Clearance audit: samples every moving collider over `duration` seconds and
+## returns the smallest distance to static geometry (body 0) with the worst spot.
+## Pinch gaps below one grain diameter are where grains get crushed.
+func clearance(duration: float, steps: int) -> Dictionary:
+	var worst := INF
+	var where := Vector2.ZERO
+	var who := ""
+	# Gaps under SEAL are seals (smaller than the smallest grain, nothing enters);
+	# the pinch band is SEAL .. 3 cm.
+	for step in steps:
+		update(duration * step / steps)
+		for pr in prims:
+			# Cleats ride on their belt by design; everything else must keep clear.
+			if pr.body == 0 or pr.flags & (FLAG_SINK | FLAG_VISUAL | FLAG_HEAT) or bodies[pr.body].name == "cleat":
+				continue
+			var xf := body_xform(pr.body)
+			for k in pr.repeat:
+				var rep := Transform2D(TAU * k / pr.repeat, Vector2.ZERO)
+				for q in outline(pr, 16):
+					var p: Vector2 = xf * (rep * q)
+					var d := sdf(p, true)
+					if d >= SEAL and d < worst:
+						worst = d
+						where = p
+						who = bodies[pr.body].name
+	update(0.0)
+	return {"min_open_gap_m": snappedf(worst, 0.0001), "at": where, "body": who, "pinch": worst < 0.03}
+
+
+## Primitive outline in body space (before polar repeat), n points per arc.
+static func outline(p: Dictionary, n := 24) -> PackedVector2Array:
+	var local := PackedVector2Array()
+	var sh: Array = p.shape
+	match p.type:
+		CIRCLE:
+			for i in n:
+				local.append(Vector2.from_angle(TAU * i / n) * sh[0])
+		CAPSULE:
+			for i in n / 2 + 1:
+				local.append(Vector2(sh[0], 0) + Vector2.from_angle(-PI / 2 + PI * i / (n / 2)) * sh[1])
+			for i in n / 2 + 1:
+				local.append(Vector2(-sh[0], 0) + Vector2.from_angle(PI / 2 + PI * i / (n / 2)) * sh[1])
+		BOX:
+			var c: float = sh[2]
+			var e := Vector2(sh[0], sh[1]) - Vector2(c, c)
+			for q in 4:
+				var ctr := Vector2(e.x * (1 if q == 0 or q == 3 else -1), e.y * (1 if q < 2 else -1))
+				for i in 6:
+					local.append(ctr + Vector2.from_angle(PI / 2 * q + PI / 2 * i / 5.0) * c)
+		ARC:
+			var ra: float = sh[0]
+			var rb: float = sh[1]
+			var half: float = sh[2]
+			for i in n + 1:
+				local.append(Vector2.from_angle(PI / 2 - half + 2.0 * half * i / n) * (ra + rb))
+			for i in n + 1:
+				local.append(Vector2.from_angle(PI / 2 + half - 2.0 * half * i / n) * (ra - rb))
+	var xf := Transform2D(p.angle, p.offset)
+	var out := PackedVector2Array()
+	for q in local:
+		out.append(xf * q)
+	return out
+

@@ -26,8 +26,8 @@ const SAND_DENSITY := 1600.0
 
 ## Material table. id = index. Colors live per particle, not per material.
 const MATERIALS := [
-	{"name": "sand", "mu_s": 0.6249, "mu_k": 0.5317, "restitution": 0.15, "density": SAND_DENSITY},
-	{"name": "piece", "mu_s": 0.6249, "mu_k": 0.5317, "restitution": 0.15, "density": SAND_DENSITY,
+	{"name": "sand", "mu_s": 0.6249, "mu_k": 0.5317, "restitution": 0.03, "density": SAND_DENSITY},
+	{"name": "piece", "mu_s": 0.6249, "mu_k": 0.5317, "restitution": 0.03, "density": SAND_DENSITY,
 		"compliance": 0.0, "break_strain": 0.12},
 ]
 
