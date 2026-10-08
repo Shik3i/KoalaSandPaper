@@ -17,6 +17,9 @@ var view: ParticleView
 var mview: MachineView
 var next_piece := 0.5
 var spawned := 0
+var piece_slot := 0
+var cpu_machine_us := 0
+var cpu_step_us := 0
 var t0 := 0
 
 
@@ -38,7 +41,7 @@ func _ready() -> void:
 	solver.substeps = int(args.get("sub", 48))
 	solver.setup(CAPACITY, Factory.WORLD)
 	pool = SlotPool.new(CAPACITY)
-	_prefill(int(args.get("prefill", 20000)))
+	_prefill(int(args.get("prefill", 8000)))
 
 	var sz := get_viewport_rect().size
 	var ppm := minf(sz.x / Factory.WORLD.x, sz.y / Factory.WORLD.y)
@@ -61,12 +64,12 @@ func _prefill(n: int) -> void:
 
 func _spawn_piece() -> void:
 	var shape: String = SHAPE_KEYS[rng.randi() % SHAPE_KEYS.size()]
-	var piece := Tetromino.make(shape, factory.spawn_at, BLOCK, Spawn.SORBET[rng.randi() % 6], rng,
-		Vector2(Factory.BELT_SPEED, 0.0))
+	var piece := Tetromino.make(shape, factory.spawn_at, BLOCK, Spawn.SORBET[rng.randi() % 6], rng)
 	var at := pool.alloc(piece.size())
 	if at < 0:
 		return
-	solver.write_set(at, piece)
+	solver.spawn_piece(piece_slot, at, piece, factory.spawn_at, Vector2(Factory.BELT_SPEED, 0.0))
+	piece_slot = (piece_slot + 1) % GpuSolver.MAX_PIECES
 	spawned += piece.size()
 
 
@@ -75,13 +78,14 @@ func _process(_d: float) -> void:
 	if t >= next_piece:
 		_spawn_piece()
 		next_piece += PIECE_PERIOD
+	var c0 := Time.get_ticks_usec()
 	factory.update(t)
-	var beam := factory.laser(t)
-	solver.laser_a = beam[0]
-	solver.laser_b = beam[1]
-	mview.laser = beam
 	factory.upload(solver)
+	solver.active_n = maxi(pool.high_water, 1)
+	var c1 := Time.get_ticks_usec()
 	solver.step()
+	cpu_machine_us += c1 - c0
+	cpu_step_us += Time.get_ticks_usec() - c1
 	pool.frame = solver.frames
 	if args.has("reset_at") and solver.frames == int(args.reset_at):
 		solver.reset_stats()
@@ -96,7 +100,7 @@ func _process(_d: float) -> void:
 func _labels(ppm: float) -> void:
 	var title := Label.new()
 	title.text = "KOALASANDPAPER / KINETIC STUDY 001"
-	title.position = Vector2(0.4, 0.25) * ppm
+	title.position = Vector2(1.2, 0.18) * ppm
 	title.add_theme_font_size_override("font_size", int(0.16 * ppm))
 	title.modulate = Color("#8fa3a8")
 	add_child(title)
@@ -131,7 +135,7 @@ func _report() -> void:
 	if args.get("diag", "0") == "1":
 		st["diag"] = _diag(info)
 	var wall := (Time.get_ticks_msec() - t0) / 1000.0
-	print(JSON.stringify({"scene": "factory", "frames": solver.frames, "sim_s": snappedf(solver.sim_time, 0.01),
+	print(JSON.stringify({"scene": "factory", "frames": solver.frames, "sinks": Array(solver.read_sinks()), "pgrid_overflow": factory.grid_overflow, "cpu_machine_ms": snappedf(cpu_machine_us / 1000.0 / solver.frames, 0.01), "cpu_step_ms": snappedf(cpu_step_us / 1000.0 / solver.frames, 0.01), "sim_s": snappedf(solver.sim_time, 0.01),
 		"fps": snappedf(solver.frames / wall, 0.1), "active": active, "bonded": bonded, "spawned": spawned,
 		"sunk": st.sunk, "stats": st, "free": pool.free_count()}))
 	solver.free_all()

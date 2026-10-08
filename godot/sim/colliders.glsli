@@ -40,9 +40,11 @@ float prim_sdf(Prim pr, vec2 q) {
 // t: pose time (substep end for the solve, substep start for stabilisation).
 // stab: position-only push-out, no friction, no surface motion.
 void collider_contacts(float t, bool stab, float rad, vec4 mi, inout Surf su) {
-	for (uint k = 0u; k < pc.n_prims; k++) {
-		Prim pr = PRIMS[k];
-		if ((pr.head.w & 6u) != 0u) continue;  // sink zone or visual-only: no collision
+	uint cell = pgrid_cell(su.p);
+	uint cnt = PGRID[cell];
+	for (uint gi = 1u; gi <= cnt; gi++) {
+		Prim pr = PRIMS[PGRID[cell + gi]];
+		if ((pr.head.w & 14u) != 0u) continue;  // sink/heat zone or visual-only: no collision
 		vec2 bpos, bvel;
 		float bang, bom;
 		body_pose(pr.head.y, t, bpos, bang, bvel, bom);
@@ -61,7 +63,10 @@ void collider_contacts(float t, bool stab, float rad, vec4 mi, inout Surf su) {
 			su.p += n * (rad - d);
 			continue;
 		}
-		vec2 vs = bvel + bom * vec2(-rp.y, rp.x) + pr.surf.w * vec2(n.y, -n.x);
+		vec2 vs = bvel + bom * vec2(-rp.y, rp.x);
+		// Belt drive acts on the carrying (upper, flat) face only.
+		vec2 up = rot(bang) * rot(pr.xf.z) * vec2(0.0, 1.0);
+		if (dot(n, up) > 0.9) vs += pr.surf.w * vec2(up.y, -up.x);
 		surface_contact(n, rad - d, vs * pc.h, 0.5 * (mi.x + pr.surf.x), 0.5 * (mi.y + pr.surf.y), su);
 	}
 }

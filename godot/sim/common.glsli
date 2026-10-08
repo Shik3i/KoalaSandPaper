@@ -17,7 +17,8 @@
 #define BODIES_PER_PIECE 4u
 
 #define FLAG_LAST 1u
-// bit 1: no pre-stabilisation; bit 2: grid parity of this substep.
+// bit 1: no pre-stabilisation; bit 2: grid parity; bits 8-15: global substep counter mod 240.
+#define FLAG_NOSTAB 2u
 #define FLAG_PARITY 4u
 #define CELL_NONE 0xffffffffu
 
@@ -38,13 +39,15 @@
 #define PRIM_BOX 2u
 #define PRIM_ARC 3u
 
+// Positions at the substep start (pre-stabilisation already applied by integrate);
+// after finalize: positions at the substep end.
 layout(set = 0, binding = 0, std430) restrict buffer XBuf { vec2 X[]; };
 // Substep displacement (predicted position = X + D). Kept separate from X so
 // velocity D/h does not lose precision to float32 rounding of positions.
 layout(set = 0, binding = 1, std430) restrict buffer DInBuf { vec2 D_IN[]; };
 layout(set = 0, binding = 2, std430) restrict buffer DOutBuf { vec2 D_OUT[]; };
 layout(set = 0, binding = 3, std430) restrict buffer VBuf { vec2 V[]; };
-// bits 0-7 material, 8-15 kind.
+// bits 0-7 material, 8-15 kind, 16-23 radius code, 24-31 heat (glow; burns in heat zones).
 layout(set = 0, binding = 4, std430) restrict buffer InfoBuf { uint INFO[]; };
 // Packed 0xRRGGBB (24 bit, exact as float in the render texture).
 layout(set = 0, binding = 5, std430) restrict buffer ColorBuf { uint COLOR[]; };
@@ -56,8 +59,8 @@ layout(set = 0, binding = 9, std430) restrict buffer StatsBuf { uint STATS[]; };
 // [2m+1] = (bond_compliance, break_strain, density, 0). Mass scales with r^3.
 layout(set = 0, binding = 10, std430) restrict readonly buffer MatBuf { vec4 MAT[]; };
 layout(set = 0, binding = 11, rgba32f) uniform restrict writeonly image2D RENDER_IMG;
-layout(set = 0, binding = 12, std430) restrict readonly buffer RadBuf { float RAD[]; };
-// Kinematic bodies: [2b] = (pos.x, pos.y, angle, 0) at frame start, [2b+1] = (vel.x, vel.y, omega, 0).
+// Packed (X, D) written by integrate: one coalesced read per neighbour in contacts.
+layout(set = 0, binding = 12, std430) restrict buffer XDBuf { vec4 XD[]; };
 layout(set = 0, binding = 13, std430) restrict readonly buffer BodyBuf { vec4 BODY[]; };
 struct Prim {
 	uvec4 head;   // type, body, polar repeat count, flags (1 = inverted)
@@ -68,13 +71,13 @@ struct Prim {
 layout(set = 0, binding = 14, std430) restrict readonly buffer PrimBuf { Prim PRIMS[]; };
 // Per particle MAX_BONDS slots: x = partner + 1 (0 = empty), bit 31 = broken; y = rest length bits.
 layout(set = 0, binding = 15, std430) restrict buffer BondBuf { uvec2 BONDS[]; };
-// Pre-stabilisation shift of this substep (Macklin et al. 2014, §4.4): overlap
-// present at the substep start is removed by moving X itself, so it never turns
-// into velocity. Effective start position = X + STAB.
+// Pre-stabilisation shift (Macklin et al. 2014, §4.4): overlap present at the
+// substep start is removed by moving X itself (applied in integrate), never
+// turned into velocity. Computed by the velocity pass on the end positions.
 layout(set = 0, binding = 16, std430) restrict buffer StabBuf { vec2 STAB[]; };
-// Velocity pass (XPBD, Müller et al. 2020 §3.6): VN = velocity from the position
-// solve, VOLD = velocity at the substep start; the pass writes the final V.
-layout(set = 0, binding = 17, std430) restrict buffer VNBuf { vec2 VN[]; };
+// Velocity pass (XPBD, Müller et al. 2020 §3.6): XV = (end position, velocity
+// from the position solve), VOLD = velocity at the substep start.
+layout(set = 0, binding = 17, std430) restrict buffer XVBuf { vec4 XV[]; };
 layout(set = 0, binding = 18, std430) restrict buffer VOldBuf { vec2 VOLD[]; };
 // Rigid pieces. REST: grain position in the piece's rest frame. BODY_OF: body
 // index (piece * 4 + sub) or CELL_NONE; kept after shattering as fragment id.
@@ -88,6 +91,9 @@ layout(set = 0, binding = 22, std430) restrict buffer PieceBuf { uvec4 PIECES[];
 // Rigid grains: surface friction demand (tangential slip t.xy, mu_s*pen, mu_k*pen),
 // resolved per body in rigid_solve (Coulomb at piece level, translation only).
 layout(set = 0, binding = 23, std430) restrict buffer FricBuf { vec4 FRIC[]; };
+// Coarse collider grid (built on the CPU per frame): per cell [count, prim ids...].
+layout(set = 0, binding = 24, std430) restrict readonly buffer PGridBuf { uint PGRID[]; };
+#define PCELL_STRIDE 32u
 
 layout(push_constant, std430) uniform Params {
 	vec2 world;
@@ -104,19 +110,32 @@ layout(push_constant, std430) uniform Params {
 	float stack_k;  // shock-propagation strength (0 = off)
 	float omega;    // Jacobi relaxation
 	float t_sub;    // time of this substep's end, relative to frame start
-	uint n_prims;
+	uint cap;       // buffer capacity (stride of the parity-split CELL_OF)
 	float sleep;    // displacement below which a particle keeps its position (m/substep)
 	float r_max;
-	float pad0;
+	float inv_pcell; // 1 / coarse collider cell size
 	uint n_pieces;
 	float crush;    // rigid residual (m) above which a squeezed piece shatters
 	float kerf;     // laser kerf half width (m)
-	float pad1;
+	uint pgrid;     // coarse grid width | height << 16
 	vec2 laser_a;   // laser beam segment (a == b: off); cuts every bond crossing it
 	vec2 laser_b;
 } pc;
 
 uint kind_of(uint info) { return (info >> 8u) & 0xffu; }
+uint heat_of(uint info) { return info >> 24u; }
+uint with_heat(uint info, uint heat) { return (info & 0x00ffffffu) | (min(heat, 255u) << 24u); }
+uint substep_counter() { return (pc.flags >> 8u) & 0xffu; }
+// Radius code: r = R (1 + POLY (code / 127.5 - 1)), POLY = r_max / R - 1.
+float rad_of(uint info) { return pc.r * (1.0 + (pc.r_max / pc.r - 1.0) * (float((info >> 16u) & 0xffu) / 127.5 - 1.0)); }
+
+// Coarse collider cell of position p: index of its [count, ids...] block.
+uint pgrid_cell(vec2 p) {
+	uint gw = pc.pgrid & 0xffffu;
+	uint gh = pc.pgrid >> 16u;
+	ivec2 c = clamp(ivec2(floor(p * pc.inv_pcell)), ivec2(0), ivec2(gw, gh) - 1);
+	return (uint(c.y) * gw + uint(c.x)) * PCELL_STRIDE;
+}
 uint mat_of(uint info) { return info & 0xffu; }
 
 float inv_mass(uint info, float rad) {
@@ -127,7 +146,7 @@ float inv_mass(uint info, float rad) {
 uint par() { return (pc.flags & FLAG_PARITY) != 0u ? 1u : 0u; }
 uint cells_total() { return pc.grid_w * pc.grid_h; }
 uint count_at(uint cell) { return min(CELL_COUNT[par() * cells_total() + cell], CELL_CAP); }
-uint cell_of(uint i) { return CELL_OF[par() * pc.n + i]; }
+uint cell_of(uint i) { return CELL_OF[par() * pc.cap + i]; }
 
 // Inverse mass used for contact splitting: rigid grains carry their body's mass.
 float particle_w(uint i, uint info, float rad) {

@@ -5,7 +5,7 @@ extends Node2D
 
 const COLORS := {
 	"wall": Color("#55676d"), "belt": Color("#3c4a50"), "roller": Color("#718781"),
-	"rotor": Color("#718781"), "piston": Color("#8a9c97"), "rod": Color("#46565b"), "": Color("#55676d"),
+	"rotor": Color("#718781"), "piston": Color("#8a9c97"), "rod": Color("#46565b"), "bucket": Color("#7d8f8a"), "peg": Color("#8a9c97"), "cleat": Color("#8a9c97"), "drum": Color("#2b363b"), "": Color("#55676d"),
 }
 
 var machine: Machine
@@ -26,7 +26,7 @@ func _draw() -> void:
 	if machine == null:
 		return
 	for p in machine.prims:
-		if p.flags & Machine.FLAG_SINK:
+		if p.flags & (Machine.FLAG_SINK | Machine.FLAG_HEAT):
 			continue
 		var outline := _outline(p)
 		var xf := machine.body_xform(p.body)

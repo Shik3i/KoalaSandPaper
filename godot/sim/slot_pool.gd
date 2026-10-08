@@ -9,6 +9,8 @@ var alloc_frame := PackedInt32Array()
 var frame := 0
 var _pending := -1
 var _cursor := 0
+## One past the highest slot ever allocated (dispatch range for the solver).
+var high_water := 0
 
 
 func _init(capacity: int) -> void:
@@ -32,6 +34,7 @@ func alloc(n: int) -> int:
 					used[k] = 1
 					alloc_frame[k] = frame
 				_cursor = (i + 1) % cap
+				high_water = maxi(high_water, i + 1)
 				return first
 	return -1
 

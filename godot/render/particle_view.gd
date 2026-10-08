@@ -19,4 +19,5 @@ func bind(solver: GpuSolver, px_per_m: float) -> void:
 	mat.set_shader_parameter("px_per_m", px_per_m)
 	mat.set_shader_parameter("world_h", solver.world.y)
 	mat.set_shader_parameter("ref_d_px", 2.0 * solver.radius * px_per_m)
+	mat.set_shader_parameter("poly", solver.r_max / solver.radius - 1.0)
 	material = mat

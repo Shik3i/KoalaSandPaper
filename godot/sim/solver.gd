@@ -7,15 +7,17 @@ const TEX_W := 1024
 const CELL_CAP := 8
 const MAX_BONDS := 6
 const WG := 256
-const MAX_BODIES := 64
-const MAX_PRIMS := 256
-const KERNELS := ["rigid_predict", "integrate", "stabilize", "contacts", "rigid_solve", "finalize", "velocity"]
+const MAX_BODIES := 256
+const MAX_PRIMS := 512
+const KERNELS := ["rigid_predict", "integrate", "contacts", "rigid_solve", "finalize", "velocity"]
 const MAX_PIECES := 256
 const BODIES_PER_PIECE := 4
 const STAT_KEYS := ["clamp", "overflow", "nan", "oob", "max_pen_r", "max_speed", "broken", "sunk"]
 
 var rd: RenderingDevice
 var capacity := 0
+## Highest used slot + 1: kernels are dispatched over [0, active_n).
+var active_n := 0
 var world := Vector2.ZERO
 var radius := SimConst.R
 var r_max := SimConst.R_MAX
@@ -28,6 +30,7 @@ var stack_k := SimConst.STACK_K
 var sleep := SimConst.SLEEP
 var gravity := SimConst.GRAVITY
 var n_prims := 0
+var pgrid_dims := Vector2i.ONE
 ## Laser beam segment for this frame (a == b: off).
 var laser_a := Vector2.ZERO
 var laser_b := Vector2.ZERO
@@ -47,6 +50,7 @@ var _buf := {}
 var _tex: RID
 var _shaders: Array[RID] = []
 var _parity := 0
+var _substep := 0
 
 
 func setup(cap: int, world_size: Vector2, materials: Array = SimConst.MATERIALS) -> void:
@@ -56,8 +60,11 @@ func setup(cap: int, world_size: Vector2, materials: Array = SimConst.MATERIALS)
 	world = world_size
 	grid = Vector2i(ceili(world.x / (2.0 * r_max)), ceili(world.y / (2.0 * r_max)))
 	var cells := grid.x * grid.y
-	for k in ["x", "pa", "pb", "v", "stab", "vn", "vold", "rest"]:
+	active_n = cap
+	for k in ["x", "pa", "pb", "v", "stab", "vold", "rest"]:
 		_sbuf(k, cap * 8)
+	for k in ["xd", "xv"]:
+		_sbuf(k, cap * 16)
 	var none := PackedInt32Array()
 	none.resize(cap)
 	none.fill(-1)
@@ -65,7 +72,9 @@ func setup(cap: int, world_size: Vector2, materials: Array = SimConst.MATERIALS)
 	_sbuf("rb", MAX_PIECES * BODIES_PER_PIECE * 64)
 	_sbuf("pieces", MAX_PIECES * 16)
 	_sbuf("fric", cap * 16)
-	for k in ["info", "color", "rad"]:
+	pgrid_dims = Vector2i(ceili(world.x / Machine.PCELL), ceili(world.y / Machine.PCELL))
+	_sbuf("pgrid", pgrid_dims.x * pgrid_dims.y * (Machine.PCELL_CAP + 1) * 4)
+	for k in ["info", "color"]:
 		_sbuf(k, cap * 4)
 	# Grid double-buffered by substep parity (see common.glsli).
 	_sbuf("cell_of", cap * 4 * 2)
@@ -113,11 +122,13 @@ func write(offset: int, x: PackedVector2Array, v: PackedVector2Array, info: Pack
 	if rad.is_empty():
 		rad.resize(n)
 		rad.fill(radius)
+	info = info.duplicate()
+	for i in n:
+		info[i] = (info[i] & ~0xff0000) | (radius_code(rad[i]) << 16)
 	rd.buffer_update(_buf.x, offset * 8, n * 8, x.to_byte_array())
 	rd.buffer_update(_buf.v, offset * 8, n * 8, v.to_byte_array())
 	rd.buffer_update(_buf.info, offset * 4, n * 4, info.to_byte_array())
 	rd.buffer_update(_buf.color, offset * 4, n * 4, color.to_byte_array())
-	rd.buffer_update(_buf.rad, offset * 4, n * 4, rad.to_byte_array())
 
 
 ## Writes a ParticleSet (sim/particle_set.gd) at offset, including bonds.
@@ -163,9 +174,12 @@ func spawn_piece(piece: int, offset: int, s: ParticleSet, origin: Vector2, vel: 
 	rd.buffer_update(_buf.pieces, piece * 16, 16, pd.to_byte_array())
 
 
-## Machine colliders: bodies = 8 floats each, prims = 64 bytes each (see colliders.glsli).
-func set_colliders(bodies: PackedFloat32Array, prims: PackedByteArray) -> void:
+## Machine colliders: bodies = 8 floats each, prims = 64 bytes each (see colliders.glsli),
+## grid = coarse collider grid (Machine.pack_grid) of `dims` cells.
+func set_colliders(bodies: PackedFloat32Array, prims: PackedByteArray, grid: PackedInt32Array, dims: Vector2i) -> void:
 	assert(bodies.size() <= MAX_BODIES * 8 and prims.size() <= MAX_PRIMS * 64)
+	assert(dims == pgrid_dims, "machine.world must match the solver world")
+	rd.buffer_update(_buf.pgrid, 0, grid.size() * 4, grid.to_byte_array())
 	if bodies.size() > 0:
 		rd.buffer_update(_buf.bodies, 0, bodies.size() * 4, bodies.to_byte_array())
 	if prims.size() > 0:
@@ -175,18 +189,18 @@ func set_colliders(bodies: PackedFloat32Array, prims: PackedByteArray) -> void:
 
 func step(frame_dt: float = SimConst.DT) -> void:
 	var h := frame_dt / substeps
-	var groups := ceili(float(capacity) / WG)
+	var groups := ceili(float(active_n) / WG)
 	var cl := rd.compute_list_begin()
 	for s in substeps:
 		var last := s == substeps - 1
 		var t := (s + 1) * h
 		var nostab := 0 if stabilize else 2
 		_parity = 1 - _parity
-		var flags := (1 if last else 0) | nostab | (4 * _parity)
+		_substep = (_substep + 1) % 240
+		var flags := (1 if last else 0) | nostab | (4 * _parity) | (_substep << 8)
 		var p := _push(h, t, flags)
 		_dispatch(cl, "rigid_predict", 0, p, ceili(float(MAX_PIECES * BODIES_PER_PIECE) / WG))
 		_dispatch(cl, "integrate", 0, p, groups)
-		_dispatch(cl, "stabilize", 0, p, groups)
 		var cur := 0
 		for it in iterations:
 			_dispatch(cl, "contacts", cur, _push(h, t, flags | 1) if last and it == iterations - 1 else _push(h, t, flags & ~1), groups)
@@ -232,7 +246,13 @@ func read_floats(key: String, offset := 0, size := 0) -> PackedFloat32Array:
 
 
 func read_radii() -> PackedFloat32Array:
-	return rd.buffer_get_data(_buf.rad).to_float32_array()
+	var info := read_info()
+	var out := PackedFloat32Array()
+	out.resize(info.size())
+	var poly := r_max / radius - 1.0
+	for i in info.size():
+		out[i] = radius * (1.0 + poly * (((info[i] >> 16) & 0xff) / 127.5 - 1.0))
+	return out
 
 
 func read_info() -> PackedInt32Array:
@@ -261,6 +281,12 @@ func free_all() -> void:
 	rd = null
 
 
+## 8-bit radius code (see rad_of in common.glsli).
+func radius_code(r: float) -> int:
+	var poly := r_max / radius - 1.0
+	return clampi(roundi((r / radius - 1.0) / poly * 127.5 + 127.5), 0, 255)
+
+
 static func info_word(kind: int, material: int) -> int:
 	return (kind << 8) | material
 
@@ -282,7 +308,7 @@ func _sbuf(key: String, bytes: int, data := PackedByteArray()) -> void:
 
 func _make_set(shader: RID, p_in: String, p_out: String) -> RID:
 	var order := ["x", p_in, p_out, "v", "info", "color", "cell_count", "cell_items", "cell_of", "stats", "mat",
-		"", "rad", "bodies", "prims", "bonds", "stab", "vn", "vold", "rest", "body_of", "rb", "pieces", "fric"]
+		"", "xd", "bodies", "prims", "bonds", "stab", "xv", "vold", "rest", "body_of", "rb", "pieces", "fric", "pgrid"]
 	var us: Array[RDUniform] = []
 	for b in order.size():
 		var u := RDUniform.new()
@@ -316,7 +342,7 @@ func _push(h: float, t_sub: float, flags: int) -> PackedByteArray:
 	b.encode_float(20, radius)
 	b.encode_float(24, 1.0 / (2.0 * r_max))
 	b.encode_float(28, 0.5 * radius)
-	b.encode_u32(32, capacity)
+	b.encode_u32(32, active_n)
 	b.encode_u32(36, grid.x)
 	b.encode_u32(40, grid.y)
 	b.encode_u32(44, flags)
@@ -324,14 +350,14 @@ func _push(h: float, t_sub: float, flags: int) -> PackedByteArray:
 	b.encode_float(52, stack_k)
 	b.encode_float(56, omega)
 	b.encode_float(60, t_sub)
-	b.encode_u32(64, n_prims)
+	b.encode_u32(64, capacity)
 	b.encode_float(68, sleep * radius)
 	b.encode_float(72, r_max)
-	b.encode_float(76, 0.0)
+	b.encode_float(76, 1.0 / Machine.PCELL)
 	b.encode_u32(80, MAX_PIECES)
 	b.encode_float(84, crush * radius)
 	b.encode_float(88, kerf)
-	b.encode_float(92, 0.0)
+	b.encode_u32(92, pgrid_dims.x | (pgrid_dims.y << 16))
 	b.encode_float(96, laser_a.x)
 	b.encode_float(100, laser_a.y)
 	b.encode_float(104, laser_b.x)

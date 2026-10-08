@@ -35,6 +35,7 @@ func make_solver(cap: int, world: Vector2, sub := SimConst.SUBSTEPS) -> GpuSolve
 	s.omega = float(args.get("omega", s.omega))
 	s.iterations = int(args.get("it", s.iterations))
 	s.damping = float(args.get("damp", s.damping))
+	s.stabilize = args.get("stab", "1") == "1"
 	s.setup(cap, world)
 	solver = s
 	return s
@@ -42,6 +43,7 @@ func make_solver(cap: int, world: Vector2, sub := SimConst.SUBSTEPS) -> GpuSolve
 
 func step() -> void:
 	if machine:
+		machine.world = solver.world
 		machine.update(solver.sim_time)
 		machine.upload(solver)
 	solver.step()

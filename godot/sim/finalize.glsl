@@ -1,15 +1,14 @@
 #[compute]
 #version 450
-// Position update (X += STAB + D), velocity from the position solve into VN
-// (the velocity pass makes it final), sinks, guards; on the last substep writes
-// the render state texture.
+// Position update (X += D, or the solved rigid pose), velocity from the position
+// solve (XV.zw; the velocity pass makes it final), sinks and heat zones, guards;
+// on the last substep writes the render state texture.
 #include "common.glsli"
 #include "colliders.glsli"
 layout(local_size_x = WG) in;
 
 void main() {
 	uint i = gl_GlobalInvocationID.x;
-	// Reference the last push-constant member so every kernel declares the same block size.
 	if (i >= pc.n || pc.laser_b.x < -1e30) return;
 	uint info = INFO[i];
 	uint kind = kind_of(info);
@@ -19,7 +18,7 @@ void main() {
 		if (last) imageStore(RENDER_IMG, texel, vec4(0.0));
 		return;
 	}
-	vec2 x = X[i] + STAB[i];
+	vec2 x = X[i];
 	vec2 d = D_IN[i];
 	if (kind == KIND_RIGID) {
 		// Final pose solved by rigid_solve.glsl.
@@ -47,25 +46,42 @@ void main() {
 		atomicAdd(STATS[ST_OOB], 1u);
 		p = clamp(p, vec2(pc.r), pc.world - pc.r);
 	}
-	for (uint k = 0u; k < pc.n_prims; k++) {
-		Prim pr = PRIMS[k];
-		if ((pr.head.w & 2u) == 0u) continue;  // sinks only
+	// Zones: sinks remove; heat zones heat grains until they burn. Outside, grains cool.
+	uint heat = heat_of(info);
+	bool heating = false;
+	uint pcell = pgrid_cell(p);
+	uint pcnt = PGRID[pcell];
+	for (uint gi = 1u; gi <= pcnt; gi++) {
+		Prim pr = PRIMS[PGRID[pcell + gi]];
+		if ((pr.head.w & 10u) == 0u) continue;
 		vec2 bpos, bvel;
 		float bang, bom;
 		body_pose(pr.head.y, pc.t_sub, bpos, bang, bvel, bom);
-		if (prim_sdf(pr, rot(-bang) * (p - bpos)) < 0.0) {
-			INFO[i] = 0u;
-			atomicAdd(STATS[8u + min(pr.head.w >> 8u, 3u)], 1u);
-			atomicAdd(STATS[ST_SUNK], 1u);
-			if (last) imageStore(RENDER_IMG, texel, vec4(0.0));
-			return;
+		if (prim_sdf(pr, rot(-bang) * (p - bpos)) >= 0.0) continue;
+		if ((pr.head.w & 8u) != 0u && heat < 250u) {
+			heating = true;
+			continue;
 		}
+		INFO[i] = 0u;
+		atomicAdd(STATS[8u + min(pr.head.w >> 8u, 3u)], 1u);
+		atomicAdd(STATS[ST_SUNK], 1u);
+		if (last) imageStore(RENDER_IMG, texel, vec4(0.0));
+		return;
 	}
+	uint sc = substep_counter();
+	if (heating) {
+		if (sc % 8u == 0u) heat += 1u;
+	} else if (heat > 0u && sc % 24u == 0u) {
+		heat -= 1u;
+	}
+	info = with_heat(info, heat);
+	INFO[i] = info;
 	X[i] = p;
 	VOLD[i] = V[i];
-	VN[i] = v;
+	XV[i] = vec4(p, v);
 	if (last) {
-		float w = float(kind) + clamp(RAD[i] / (2.0 * pc.r), 0.0, 0.999);
-		imageStore(RENDER_IMG, texel, vec4(p, float(COLOR[i] & 0xffffffu), w));
+		// w packs kind (3 bit) | radius code (8 bit) | heat (8 bit): exact in float.
+		uint w = min(kind, 7u) | (((info >> 16u) & 0xffu) << 3u) | (heat << 11u);
+		imageStore(RENDER_IMG, texel, vec4(p, float(COLOR[i] & 0xffffffu), float(w)));
 	}
 }

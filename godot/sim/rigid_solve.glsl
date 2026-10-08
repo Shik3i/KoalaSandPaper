@@ -61,7 +61,7 @@ void main() {
 		for (uint i = pd.x + tid; i < pd.x + pd.y; i += WG) {
 			if (kind_of(INFO[i]) != KIND_RIGID) continue;
 			uint k = BODY_OF[i] - base;
-			vec2 p = X[i] + STAB[i] + D_AFTER[i];
+			vec2 p = X[i] + D_AFTER[i];
 			if (beam_dist(p) < pc.kerf) atomicOr(s_hit[k], 1u);
 			else if (side_of(p) > 0.0) atomicAdd(s_left[k], 1u);
 			else atomicAdd(s_right[k], 1u);
@@ -84,11 +84,10 @@ void main() {
 			if (kind_of(info) != KIND_RIGID) continue;
 			uint k = BODY_OF[i] - base;
 			if (s_hit[k] == 0u) continue;
-			vec2 p = X[i] + STAB[i] + D_AFTER[i];
+			vec2 p = X[i] + D_AFTER[i];
 			if (beam_dist(p) < pc.kerf) {
 				// Burnt in the kerf: free glowing grain, keeps fragment id for bond logic.
-				INFO[i] = (info & ~0xff00u) | (KIND_GRAIN << 8u);
-				COLOR[i] = 0xff8a3cu;
+				INFO[i] = with_heat((info & ~0xff00u) | (KIND_GRAIN << 8u), 65535u);
 			} else if (s_newsub[k] >= 0 && side_of(p) <= 0.0) {
 				BODY_OF[i] = base + uint(s_newsub[k]);
 			}
@@ -98,7 +97,7 @@ void main() {
 
 	// 2. Impulse reduction per body.
 	uint nsub = s_nsub;
-	float m = 1.0 / inv_mass(KIND_RIGID << 8u | 1u, pc.r);
+	float m = 1.0 / inv_mass(KIND_RIGID << 8u | 1u, pc.r);  // rigid grains have radius R
 	for (uint k = 0u; k < nsub; k++) {
 		uint b = base + k;
 		vec4 c = RB[4u * b];
