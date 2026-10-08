@@ -2,6 +2,8 @@
 
 An endless, local kinetic-sand studio for browser, desktop and Windows live-wallpaper use.
 
+> **Status: prototype, being rebuilt.** The current JavaScript version is a falling-sand cellular automaton and is not physically driven (see [docs/AUDIT.md](docs/AUDIT.md)). The planned rebuild is a Godot 4 GPU particle solver for wallpapers and rendered videos ([docs/AGENT_PROMPT.md](docs/AGENT_PROMPT.md)).
+
 ## What runs today
 
 - `src/physics.js`: deterministic falling-sand kernel. Global bottom-to-top traversal, alternating horizontal order, one move per tick, active 32×32 chunks and sleep/wake handling.
@@ -17,7 +19,7 @@ An endless, local kinetic-sand studio for browser, desktop and Windows live-wall
 
 KoalaSandPaper ports those rules to JavaScript. It does **not** copy the original Godot game, native `NativeSandWorld`, assets, world generation, material data, factory systems, or GDExtension. The conveyor, cutting, shredding and mixer are new Paper-specific presentation and simulation systems.
 
-KoalaSand is all-rights-reserved. Its license and source provenance remain included. Do not publish this derivative or its copied source without the copyright holder's written permission.
+KoalaSand is all-rights-reserved. This repository is published by its copyright holder (Shik3i); the vendored KoalaSand files in `vendor/koalasand/` keep their original license and provenance, and no license is granted to third parties to copy, modify or redistribute them or this project.
 
 ## Run
 
