@@ -1,0 +1,78 @@
+// Shared layout for all solver kernels. SI units (m, s, kg); y points up.
+
+#define WG 256
+#define CELL_CAP 8u
+#define TEX_W 1024u
+
+#define KIND_NONE 0u
+#define KIND_GRAIN 1u
+#define KIND_BONDED 2u
+#define KIND_SPARK 3u
+
+#define FLAG_LAST 1u
+
+#define ST_CLAMP 0
+#define ST_OVERFLOW 1
+#define ST_NAN 2
+#define ST_OOB 3
+#define ST_MAX_PEN 4
+#define ST_MAX_SPEED 5
+
+layout(set = 0, binding = 0, std430) restrict buffer XBuf { vec2 X[]; };
+layout(set = 0, binding = 1, std430) restrict buffer PInBuf { vec2 P_IN[]; };
+layout(set = 0, binding = 2, std430) restrict buffer POutBuf { vec2 P_OUT[]; };
+layout(set = 0, binding = 3, std430) restrict buffer VBuf { vec2 V[]; };
+layout(set = 0, binding = 4, std430) restrict buffer InfoBuf { uint INFO[]; };
+// Packed 0xRRGGBB (24 bit, exact as float in the render texture).
+layout(set = 0, binding = 5, std430) restrict buffer ColorBuf { uint COLOR[]; };
+layout(set = 0, binding = 6, std430) restrict buffer CellCountBuf { uint CELL_COUNT[]; };
+layout(set = 0, binding = 7, std430) restrict buffer CellItemsBuf { uint CELL_ITEMS[]; };
+layout(set = 0, binding = 8, std430) restrict buffer CellOfBuf { uint CELL_OF[]; };
+layout(set = 0, binding = 9, std430) restrict buffer StatsBuf { uint STATS[]; };
+// Per material: x = mu_static, y = mu_kinetic, z = restitution, w = inverse mass.
+layout(set = 0, binding = 10, std430) restrict readonly buffer MatBuf { vec4 MAT[]; };
+layout(set = 0, binding = 11, rgba32f) uniform restrict writeonly image2D RENDER_IMG;
+
+layout(push_constant, std430) uniform Params {
+	vec2 world;
+	vec2 gravity;
+	float h;
+	float r;
+	float inv_cell;
+	float max_step;
+	uint n;
+	uint grid_w;
+	uint grid_h;
+	uint flags;
+	float damp;     // velocity factor per substep
+	float stack_k;  // shock-propagation strength (0 = off)
+	float omega;    // Jacobi relaxation
+	float pad0;
+} pc;
+
+uint kind_of(uint info) { return (info >> 8u) & 0xffu; }
+uint mat_of(uint info) { return info & 0xffu; }
+
+uvec2 cell_coord(vec2 p) {
+	ivec2 c = ivec2(floor(p * pc.inv_cell));
+	return uvec2(clamp(c, ivec2(0), ivec2(pc.grid_w, pc.grid_h) - 1));
+}
+
+void atomic_max_f(int slot, float v) {
+	// Valid for v >= 0: IEEE bit patterns order like unsigned ints.
+	atomicMax(STATS[slot], floatBitsToUint(max(v, 0.0)));
+}
+
+// Contact with an immovable (or kinematic) surface: normal n, penetration pen,
+// relative tangential displacement source rel = particle motion - surface motion.
+void surface_contact(vec2 n, float pen, vec2 rel, float mu_s, float mu_k,
+		inout vec2 acc, inout float cnt) {
+	vec2 corr = n * pen;
+	vec2 t = rel - dot(rel, n) * n;
+	float tl = length(t);
+	if (tl > 0.0) {
+		corr -= (tl < mu_s * pen) ? t : t * min(mu_k * pen / tl, 1.0);
+	}
+	acc += corr;
+	cnt += 1.0;
+}
