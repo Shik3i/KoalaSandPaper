@@ -1,56 +1,48 @@
 # KoalaSandPaper
 
-An endless, local kinetic-sand studio for browser, desktop and Windows live-wallpaper use.
+A physically driven granular-matter machine for live wallpapers and rendered 4K loops: Tetris pieces ride a conveyor, get crushed by a press, torn by toothed rollers, mixed by a rotor, and a never-stopping pusher sends half the sand back up a bucket elevator and half into a furnace. Everything you see is the result of simulation, not animation.
 
-> **Status: prototype, being rebuilt.** The current JavaScript version is a falling-sand cellular automaton and is not physically driven (see [docs/AUDIT.md](docs/AUDIT.md)). The planned rebuild is a Godot 4 GPU particle solver for wallpapers and rendered videos ([docs/AGENT_PROMPT.md](docs/AGENT_PROMPT.md)).
+Built with Godot 4.7 (Forward+, Metal) and a GPU XPBD particle solver in GLSL compute shaders. The engineering notes are in [docs/NOTES.md](docs/NOTES.md); the original audit and brief are in [docs/AUDIT.md](docs/AUDIT.md) and [docs/AGENT_PROMPT.md](docs/AGENT_PROMPT.md).
 
-## What runs today
+## Requirements
 
-- `src/physics.js`: deterministic falling-sand kernel. Global bottom-to-top traversal, alternating horizontal order, one move per tick, active 32×32 chunks and sleep/wake handling.
-- `src/factory.js`: conveyor, bound tetromino forms, laser kerf, interlocking shredder teeth, open mixer bowl, circulation field and drain. The material balance is exact: a grain is bound to a form, in the simulated world, or counted at the outlet.
-- `src/worker.js`: up to eight fixed 60 Hz steps per animation hand-off. Rendering and the studio UI remain on the main thread.
-- Browser studio: presets, tempo, palette, machine toggles, deterministic seed, zen mode and 30-second canvas recording.
-- Electron desktop shell: macOS and Windows targets are defined; renderer access to Node is disabled, context isolation and sandboxing are enabled, and external navigation is blocked.
-- Lively package: a self-contained HTML wallpaper with persistent tempo, palette and pause controls.
-
-## Origin and scope
-
-`vendor/koalasand/` contains unmodified copies of the KoalaSand Phase-1 GDScript granular reference and its deterministic hash, plus the original license and a SHA-256 provenance manifest. The copied upstream snapshot is `99cedca40f487af84d8bfd0d950af3918535259e` from `https://github.com/Shik3i/KoalaSand`.
-
-KoalaSandPaper ports those rules to JavaScript. It does **not** copy the original Godot game, native `NativeSandWorld`, assets, world generation, material data, factory systems, or GDExtension. The conveyor, cutting, shredding and mixer are new Paper-specific presentation and simulation systems.
-
-KoalaSand is all-rights-reserved. This repository is published by its copyright holder (Shik3i); the vendored KoalaSand files in `vendor/koalasand/` keep their original license and provenance, and no license is granted to third parties to copy, modify or redistribute them or this project.
+- Godot 4.7.1 (`/Applications/Godot.app` on macOS; set `GODOT=/path/to/godot` otherwise).
+- A GPU with Vulkan or Metal. Compute shaders do not run with `--headless` or the Compatibility renderer.
+- ffmpeg for video encoding.
+- On macOS, keep the desktop unlocked while simulating: hidden or locked-screen windows are throttled to about 1 fps.
 
 ## Run
 
 ```sh
-npm install
-npm run dev
+/Applications/Godot.app/Contents/MacOS/Godot --path godot
 ```
 
-Open `http://127.0.0.1:4173`.
+The factory scene runs in real time at 60 fps. Press `Esc` to quit.
+
+## Tests
 
 ```sh
-npm test
-npm run benchmark
-npm run package:wallpaper
-npm run package:desktop
+godot/tools/lint.sh
+godot/tests/run_all.sh
 ```
 
-`package:wallpaper` creates `release/KoalaSandPaper-Lively.zip`. In Lively Wallpaper, import the ZIP and use **Customise** to set tempo, palette and pause. `package:desktop` creates an unpacked platform application in `release/`; a signed distribution needs the platform signing credentials and release configuration.
+`lint.sh` parse-checks every script and compiles every compute shader. `run_all.sh` runs the machine clearance audit (headless) and the physical acceptance tests T1–T9 plus a pusher test, each printing one JSON line, then a pass/fail summary.
 
-## Platforms
+## Capture a 4K video
 
-| Surface | Current result |
-| --- | --- |
-| Web | Fully runnable from `dist/` or the development server. |
-| macOS desktop | Packaged arm64 Electron app tested as an unsigned local build. |
-| Windows desktop | Electron builder configuration is present; build it on Windows for a Windows executable. |
-| Windows live wallpaper | `KoalaSandPaper-Lively.zip` is ready for Lively's webpage-wallpaper player. |
-| macOS live wallpaper | Feasible with a native desktop-level `NSWindow` / `WKWebView` host, but not implemented in this first delivery. |
+```sh
+godot/tools/run.sh res://render/main.tscn frames=5400 save_state=../renders/state.bin
+godot/tools/capture.sh 30 renders/state.bin
+```
 
-## Validation
+The first command runs the machine in for 90 s and saves the full simulation state. The second renders 30 s with Godot's Movie Maker at 3840×2160 and a fixed 60 fps, decoupled from real time, and encodes `renders/kinetic_study_001_4k.mp4` (H.265, 10-bit). Renders are git-ignored.
 
-`npm test` has eight tests: upstream hash parity, global traversal against an independent reference, chunk-boundary single-move protection, sleep/wake, input guards, machinery move stamps, 2,400-tick factory flow/mass balance and deterministic replay.
+## Wallpaper
 
-`npm run benchmark` measures the JS kernel only, not browser paint or video encoding. On Apple M4 during this delivery: the factory averaged `0.29 ms/tick`; 91,691 active grains averaged `2.05 ms/tick`; the settled sleeping case averaged `0.025 ms/tick`.
+- **Fullscreen window:** `Godot --path godot -- wallpaper=1 fps=30` (add `load_state=/abs/path/state.bin` to start with a running machine).
+- **macOS:** set the rendered loop as a video wallpaper with a third-party wallpaper app. macOS has no built-in video wallpaper.
+- **Windows:** use the rendered video with Lively Wallpaper or Wallpaper Engine.
+
+## Licence
+
+This repository is public at the copyright holder's request (Shik3i). No licence is granted to third parties to copy, modify or redistribute it.

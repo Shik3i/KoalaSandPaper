@@ -6,4 +6,3 @@ artifacts/
 *.log
 
 renders/
-legacy/web/node_modules/

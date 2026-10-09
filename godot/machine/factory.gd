@@ -152,10 +152,14 @@ func _shredder() -> void:
 
 ## Bowl with a bottom outlet and a 3-blade rotor; the top opening (75°..105°) is
 ## only as wide as the feed neck, so the rotor cannot fling sand out.
-static func build_bowl(m: Machine, c: Vector2, r: float) -> int:
+## outlet_half = 0 closes the bottom (mixing test).
+static func build_bowl(m: Machine, c: Vector2, r: float, outlet_half := OUTLET_HALF) -> int:
 	var t := 0.025
-	m.add_arc(c, r, t, deg_to_rad(105.0), deg_to_rad(270.0 - OUTLET_HALF))
-	m.add_arc(c, r, t, deg_to_rad(270.0 + OUTLET_HALF), deg_to_rad(435.0))
+	if outlet_half > 0.0:
+		m.add_arc(c, r, t, deg_to_rad(105.0), deg_to_rad(270.0 - outlet_half))
+		m.add_arc(c, r, t, deg_to_rad(270.0 + outlet_half), deg_to_rad(435.0))
+	else:
+		m.add_arc(c, r, t, deg_to_rad(105.0), deg_to_rad(435.0))
 	var body := m.add_body(c, 0.0, "rotor")
 	m.rotor(body, ROTOR_OMEGA)
 	m.add_prim(body, CIRCLE, [0.2], Vector2.ZERO, 0.0, 1, 0, 0.0, "rotor")

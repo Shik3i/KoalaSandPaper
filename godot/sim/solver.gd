@@ -328,6 +328,39 @@ func _make_set(shader: RID, p_in: String, p_out: String) -> RID:
 	return rd.uniform_set_create(us, shader, 0)
 
 
+const STATE_BUFFERS := ["x", "v", "info", "color", "bonds", "rest", "body_of", "rb", "pieces", "stab"]
+
+
+## Snapshot of the full particle/body state (zstd-compressed var file) plus
+## caller data `extra`. Used to start captures from a run-in machine.
+func save_state(path: String, extra: Dictionary) -> void:
+	var bufs := {}
+	for k in STATE_BUFFERS:
+		bufs[k] = rd.buffer_get_data(_buf[k])
+	var d := {"version": 1, "capacity": capacity, "world": world, "frames": frames, "sim_time": sim_time,
+		"pieces_used": pieces_used, "active_n": active_n, "buffers": bufs, "extra": extra}
+	var f := FileAccess.open_compressed(path, FileAccess.WRITE, FileAccess.COMPRESSION_ZSTD)
+	f.store_var(d)
+	f.close()
+
+
+## Restores a snapshot written by save_state; returns its `extra` dictionary.
+func load_state(path: String) -> Dictionary:
+	var f := FileAccess.open_compressed(path, FileAccess.READ, FileAccess.COMPRESSION_ZSTD)
+	assert(f != null, "cannot open state " + path)
+	var d: Dictionary = f.get_var()
+	f.close()
+	assert(d.capacity == capacity and d.world == world, "state does not match this solver")
+	for k in STATE_BUFFERS:
+		var b: PackedByteArray = d.buffers[k]
+		rd.buffer_update(_buf[k], 0, b.size(), b)
+	frames = d.frames
+	sim_time = d.sim_time
+	pieces_used = d.pieces_used
+	active_n = d.active_n
+	return d.extra
+
+
 ## Profiling aid: kernels listed here are not dispatched (results become wrong).
 var skip_kernels: Array = []
 

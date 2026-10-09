@@ -44,10 +44,39 @@ func _ready() -> void:
 	solver.substeps = int(args.get("sub", 48))
 	solver.setup(CAPACITY, Factory.WORLD)
 	pool = SlotPool.new(CAPACITY)
-	_prefill(int(args.get("prefill", 8000)))
+	if args.has("load_state"):
+		_restore(solver.load_state(args.load_state))
+	else:
+		_prefill(int(args.get("prefill", 8000)))
+	if args.get("wallpaper", "0") == "1":
+		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
+		DisplayServer.mouse_set_mode(DisplayServer.MOUSE_MODE_HIDDEN)
+		Engine.max_fps = int(args.get("fps", 60))
 
 	_compose()
 	t0 = Time.get_ticks_msec()
+
+
+func _state_extra() -> Dictionary:
+	return {"spawned": spawned, "piece_slot": piece_slot, "prefill_n": prefill_n, "next_piece": next_piece,
+		"rng": rng.state, "used": pool.used, "alloc_frame": pool.alloc_frame, "high_water": pool.high_water}
+
+
+func _restore(e: Dictionary) -> void:
+	spawned = e.spawned
+	piece_slot = e.piece_slot
+	prefill_n = e.prefill_n
+	next_piece = e.next_piece
+	rng.state = e.rng
+	pool.used = e.used
+	pool.alloc_frame = e.alloc_frame
+	pool.high_water = e.high_water
+	pool.frame = solver.frames
+
+
+func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
+		get_tree().quit()
 
 
 func _prefill(n: int) -> void:
@@ -94,6 +123,8 @@ func _process(_d: float) -> void:
 		print("{\"trace\": %d, \"ms_per_frame\": %.2f, \"pieces\": %d}" % [solver.frames, (now - _trace_t) / 200.0, solver.pieces_used])
 		_trace_t = now
 	if args.has("frames") and solver.frames >= int(args.frames):
+		if args.has("save_state"):
+			solver.save_state(args.save_state, _state_extra())
 		_report()
 
 
@@ -203,6 +234,11 @@ func _report() -> void:
 		active += int(k != 0)
 		bonded += int(k == 2)
 	var st := solver.read_stats()
+	if args.get("t8", "0") == "1":
+		_t8(active, st)
+		solver.free_all()
+		get_tree().quit()
+		return
 	if args.get("diag", "0") == "1":
 		st["diag"] = _diag(info)
 	var wall := (Time.get_ticks_msec() - t0) / 1000.0
@@ -247,3 +283,26 @@ func _diag(info: PackedInt32Array) -> Dictionary:
 		if (info[i] >> 8) & 0xff != 0 and pos[i].distance_to(at) < 0.03 and near.size() < 12:
 			near.append([i, snappedf(pos[i].x, 0.0001), snappedf(pos[i].y, 0.0001), snappedf(vel[i].length(), 0.01), (info[i] >> 8) & 0xff, snappedf(factory.sdf(pos[i]), 0.0001)])
 	return {"near_overflow": near, "fast": nfast, "fast_samples": fast, "inside": inside, "inside_samples": samples, "dense_cells": worst.size(), "dense_samples": worst.slice(0, 6)}
+
+
+## T8: conservation and stability of the whole line after N frames.
+## active + burned + drained == prefill + spawned; no NaN, nothing outside the
+## world, max overlap < 0.25 r, no grain buried in static machinery.
+func _t8(active: int, st: Dictionary) -> void:
+	var sinks := solver.read_sinks()
+	var removed := 0
+	for v in sinks:
+		removed += v
+	var balance := active + removed - (prefill_n + spawned)
+	var pos := solver.read_positions()
+	var info := solver.read_info()
+	var buried := 0
+	for i in pos.size():
+		if (info[i] >> 8) & 0xff != 0 and factory.sdf(pos[i], true) < -0.5 * SimConst.R:
+			buried += 1
+	var ov := Probe.overlap(pos, solver.read_radii(), info)
+	var ok: bool = balance == 0 and st.nan == 0 and st.oob == 0 and ov.max_pen_r < 0.25 and buried == 0
+	print(JSON.stringify({"test": "t8_conservation", "pass": ok, "frames": solver.frames, "active": active,
+		"removed": removed, "prefill": prefill_n, "spawned": spawned, "balance": balance, "nan": st.nan,
+		"oob": st.oob, "max_pen_r": ov.max_pen_r, "buried_in_static": buried, "speed_clamps": st.clamp,
+		"overflow": st.overflow, "sinks": Array(sinks)}))

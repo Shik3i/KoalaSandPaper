@@ -1,13 +1,13 @@
 extends SimTest
-## T5: bowl + rotor only. Two colour halves; Lacey mixing index per rotor
-## revolution must rise from < 0.2 to > 0.8 within 6 revolutions; over 60 s no
-## grain may leave the bowl except through the outlet (sink 0 at the gap; sink 1
-## = everything else). Also reports grain speed percentiles inside the bowl.
+## T5: the factory mixer (bowl + 3-blade rotor) with its outlet closed. Two
+## colour halves; Lacey mixing index per rotor revolution must rise from < 0.2
+## to > 0.8 within 6 revolutions; over 60 s no grain may leave the bowl (sink 1
+## catches anything that does). Also reports grain speed percentiles in the bowl.
 
-const N := 14000
+const N := 9000
 const SAMPLE := 0.08
 var c := Vector2(2.0, 1.6)
-var r := 80 * Factory.S
+var r := 0.85
 var rotor := 0
 var lacey: Array = []
 var speed: Array = []
@@ -19,10 +19,7 @@ var up_samples := []
 
 func setup() -> void:
 	machine = Machine.new()
-	rotor = Factory.build_mixer(machine, c, r, false)
-	# Outlet exits land in sink 0 right outside the gap; anything else in sink 1.
-	var gap := c + Vector2.from_angle(deg_to_rad(0.5 * (Factory.OUTLET_A0 + Factory.OUTLET_A1))) * (r + 0.12)
-	machine.add_sink(gap - Vector2(0.1, 0.1), gap + Vector2(0.1, 0.1), 0)
+	rotor = Factory.build_bowl(machine, c, r, 0.0)
 	machine.add_sink(Vector2(0.0, -0.1), Vector2(4.0, 0.15), 1)
 	machine.update(0.0)
 	make_solver(N, Vector2(4.0, 3.4), int(args.get("sub", 48)))
@@ -115,6 +112,6 @@ func result() -> Dictionary:
 	var reached := false
 	for k in mini(lacey.size(), 7):
 		reached = reached or lacey[k].M > 0.8
-	return {"pass": m0 < 0.2 and reached and sinks[1] == 0, "lacey_per_rev": lacey, "outlet": sinks[0], "leaked": sinks[1],
-		"tip_speed": snappedf(absf(Factory.ROTOR_OMEGA) * 1.195, 0.01), "speed_t_p50_p99_max": speed.slice(0, 40, 4),
+	return {"pass": m0 < 0.2 and reached and sinks[1] == 0, "lacey_per_rev": lacey, "leaked": sinks[1],
+		"tip_speed": snappedf(absf(Factory.ROTOR_OMEGA) * 0.78, 0.01), "speed_t_p50_p99_max": speed.slice(0, 40, 4),
 		"max_p99": snappedf(max_p99, 0.01), "fast_dirs": dirs, "fast_not_down": up_samples, "clamp": st.clamp, "overflow": st.overflow}

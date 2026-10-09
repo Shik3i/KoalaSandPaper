@@ -2,37 +2,48 @@
 
 Overwritten as decisions change; not a log. Read this first on resume.
 
-## Versions
-- Godot 4.7.1.stable (a13da4feb), Metal 4.0, Forward+, Apple M4 (Apple9). ffmpeg: /opt/homebrew/bin/ffmpeg.
+## Versions / environment
+- Godot 4.7.1.stable (a13da4feb), Metal 4.0, Forward+, Apple M4. ffmpeg (Homebrew) for encoding.
+- GPU work needs a window *and an unlocked desktop*: macOS throttles hidden/locked Metal windows to ~1 fps, and no local RenderingDevice exists with `--headless`. Batch windows run always-on-top.
+- The display caps windows at 120 Hz even with vsync off → benchmarks use `spf=N` (N sim frames per display frame).
 
-## Layout / how to run
-- `godot/` project. `tools/run.sh <scene> k=v ...` refreshes the class cache (headless import) then runs the scene windowed (compute is unavailable headless). Scenes print one JSON line and quit.
-- Bench: `tools/run.sh res://tools/bench.tscn n=50000 sub=6 cols=1280 frames=300 warm=60 [probe=1] [shot=/abs/x.png shot_at=45]`.
+## How to run
+- Lint (GDScript + shader compile): `godot/tools/lint.sh`
+- Machine clearance audit (headless): `godot --headless --path godot --script res://tools/clearance.gd`
+- One scene: `godot/tools/run.sh <scene> k=v ...` (prints JSON lines). Factory: `res://render/main.tscn` (`frames=N`, `shot=/abs.png shots=a,b`, `full=1`, `trace=1`, `t8=1`, `save_state=`, `load_state=`, `wallpaper=1 fps=30`).
+- All tests: `godot/tests/run_all.sh` (summary table; results in /tmp/koalasandpaper_tests.jsonl).
+- 4K capture: `godot/tools/capture.sh 30 renders/state.bin` → `renders/kinetic_study_001_4k.mp4`.
 
-## Solver (sim/)
-- Kernels per substep: `integrate` (gravity, predict, clamp 0.5r, grid insert) → `contacts` ×iters (Jacobi, ping-pong pa/pb) → `finalize` (v=(p−x)/h, guards, clears own grid cell, writes render texel on the last substep).
-- Neighbour grid: fixed-capacity bins (cell 2r, CELL_CAP=8, atomic insert, overflow counted). Chosen over counting sort: no prefix scan, clear is per-particle. Revisit if contacts stay memory-bound (see perf).
-- Stats buffer (uint): clamp, overflow, nan, oob, max_pen/r (float bits), max_speed. Read only by tests/bench.
-- Render: RGBA32F texture 1024×⌈N/1024⌉ (x, y, rgb24-as-float, kind) wrapped as `Texture2DRD`; `ParticleView` = MultiMeshInstance2D, canvas shader reads it by INSTANCE_ID (skip_vertex_transform). No CPU readback.
-- GPU timestamps return 0 on Metal → time via frame deltas.
+## Solver (godot/sim) — XPBD on the main RenderingDevice
+Per substep (48 per 1/60 s frame): `rigid_predict` → `integrate` → `contacts` → `rigid_solve` → `finalize` → `velocity`.
+- State: X (positions), D (substep displacement, kept separate so v = D/h keeps float32 precision), V; packed XD/XV for neighbour reads; INFO = material | kind | radius code (8 bit) | heat (8 bit).
+- Grid: cell 2·r_max, fixed bins (CELL_CAP 4, overflow counted), double-buffered by substep parity so clearing never races with reads.
+- `integrate`: applies the pre-stabilisation shift (position only), predicts (gravity / rigid pose), clamps to 0.5 r (counted), bins.
+- `contacts` (Jacobi, constraint groups in order, Macklin 2014 §4.3): particle contacts with Coulomb friction (eq. 24) and shock-propagation mass bias exp(k·Δy/R), k = 0.13; bonds (XPBD distance, break on strain 0.12, on lost partner/fragment change). Averaging: N_eff = Σ|c|/max|c| (zero-proposing constraints don't dilute friction). Then machine surfaces + walls projected sequentially (Gauss-Seidel) on the result.
+- `rigid_solve` (one 64-thread workgroup per piece): intact pieces are rigid bodies; grain corrections → impulse response for point contacts blended with the least-squares rigid motion for extended contacts; Coulomb friction decided per piece (mean slip vs mean cone); a body pinched beyond 0.3 R for 4 substeps shatters into its bond net; laser (removed from the factory) splits bodies.
+- `finalize`: X += D (or rigid pose), velocity → XV, sinks, heat zones (glow +1/8 substeps, burn at 250, cool −1/24).
+- `velocity` (Müller 2020 §3.6): closed contacts get relative normal velocity −e·v_pre (e = 0.03, 0 below 2gh) → no popping/compression waves; same loop computes the next pre-stabilisation shift (Macklin 2014 §4.4).
+- Machine colliders: SDF prims (circle, capsule, box, arc; polar repeat; belt surface speed on the top face only), poses from analytic motion profiles with finite-difference velocities; coarse CPU-built prim grid (0.4 m cells).
 
-## Scale decision (provisional, M1 finalises)
-- r = 5 mm (grain Ø 1 cm), SI, y up. Brief's 1–2 mm is infeasible with the hard 0.5r/substep rule: v_max = 0.5r·60·N_sub (r=1 mm, N_sub=6 → 0.18 m/s). Penetration in a resting pile grows ~ g·h²·depth/r, so substeps matter quadratically.
-- At r=5 mm: N_sub=6 collapses piles (pen ≫ 0.25r); N_sub=48–60 holds them (pen 0.08r @ 20 rows). M1 must pick N_sub/stack bias by tests.
+## Scale
+- R = 5 mm (±10 % radius spread), SI, y up. The brief's 1–2 mm is infeasible with the hard 0.5 r/substep rule (max speed = 0.5 r·60·N_sub; 48 substeps → 4.8 m/s at R = 5 mm). World 12.288 × 6.912 m ≈ 1229 × 691 grain diameters ≈ 3 px per grain at 4K.
 
-## M0 gate (2026-10-08) — PASS, GPU path kept
-1920×1080 window, vsync off, block of N grains falling into a 1280×720-Ø box. fps / frame p50 / p95 (ms):
+## Factory (godot/machine/factory.gd), one loop
+Inclined bucket elevator (left, 24° lean so the empty return strand clears the head; buckets fixed to the chain, mouth in travel direction, gravity discharge, 0.5 m/s) → 37° head chute → belt A (cleated, 0.45 m/s; tetromino pieces spawn every 3 s) → press (17 cm above belt: tall pieces shatter) → shredder (2 roller pairs, tops running into the nip, 5 cm gaps) → mixer (3-blade rotor, bottom outlet ±12°) → floor with one heavy pusher on a continuous phase-modulated stroke (right of the outlet exactly half the time → 50/50) → left: elevator pit / right: furnace (heat zone). Floor drain recycles spill. `tools/clearance.gd` keeps every moving part ≥ 3 cm from static geometry (gaps < 8 mm are seals).
 
-| N | sub=6 | sub=24 | sub=48 |
-|---|---|---|---|
-| 20k | 414 / 2.2 / 3.8 | 427 / 2.2 / 3.2 | 264 / 3.6 / 6.0 |
-| 50k | 383 / 2.5 / 3.7 | 187 / 5.4 / 6.3 | 96 / 10.4 / 13.2 |
-| 100k | 207 / 4.7 / 7.0 | 82 / 12.2 / 13.9 | 42 / 24.5 / 30.5 |
+## Test status (last full run before the screen locked; see run_all.sh)
+- T1 free fall: PASS (rel err 0.023 % at 80 substeps).
+- T2 repose: PASS (30.3/31.4/31.9° and 33.1/29.9/31.3° vs 32°).
+- T3 incline (rigid 8×10 block): PASS (30° static 0.0 m; 34° slides 0.5838 m vs 0.5808 m analytic).
+- T4 silo, T5 mixer (new geometry), T6 shredding, T7 conveyor, T8 conservation, pusher: written, not yet run (screen locked).
+- Clearance audit: PASS (min open gap 3.95 cm).
+- T9 perf (48 substeps): 16k grains 5.2 ms/sim frame, 64k 32.3 ms. Factory (~20k grains + render) ≈ 50–60 fps uncapped.
 
-- Gate (≥60 fps @ ≥40k, N_sub=6): 383 fps @ 50k. Fallback (GDExtension CPU) not needed.
-- Marginal cost ≈ 0.21 ms/substep @50k, 0.51 ms @100k (≈5 ns/particle/substep): memory-bound neighbour gathers. Optimisation candidates: CELL_CAP 4, store (p, Δx) in bins, periodic spatial reorder of particle storage.
-- Known issue → M1: settled piles flatten over ~5 s (static friction diluted by Jacobi averaging / residual compression).
+## Known issues / next
+- Free-fall spill from the elevator head and long drops exceed 4.8 m/s → speed clamps counted (no tunnelling observed).
+- Perf at 64k is memory-bound (neighbour gathers): next step is periodic spatial reordering of free grains.
+- Jam/torque limits not modelled (motors are ideal kinematic drives).
+- macOS wallpaper = looped video via a third-party wallpaper app or `wallpaper=1` fullscreen window.
 
-## Open questions (defaults assumed)
-- Look: side-on 2D, shaded spheres, sorbet. Want 3 reference screenshots at M5.
-- Wallpaper: macOS looped video + fullscreen window. Output: 3840×2160@60, 30–60 s loops. Grain target 40–100k.
+## Owner preferences (from feedback)
+One readable loop, no hidden "fields": mechanisms must be visible (pistons, cleats, buckets). Pistons never pause. Rollers feed the nip. No laser. Minimal splash. Real-time speeds.
