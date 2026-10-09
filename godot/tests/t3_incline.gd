@@ -1,84 +1,76 @@
 extends SimTest
-## T3: rigid bonded block (intact piece) on a slope (gravity rotated by θ over a flat floor) stays put
-## iff tanθ < mu_s. θ = φ ± 2° with φ = atan(mu_s). Two independent solvers.
+## T3: tilting-plane test for a rigid piece (8 x 8 grain block). The block settles
+## on a flat floor, the plane is tilted slowly (gravity rotated over 0.5 s) to θ
+## and held for 1 s. Coulomb with static/kinetic friction: below φ = atan(mu_s)
+## the block stays (θ = φ - 2°: moves < 2 R); above it slides (θ = φ + 2°) with
+## acceleration g (sin θ - mu_k cos θ) (within 15 %, measured over the hold).
 
-var COLS := 10
-var ROWS := 4
+const SETTLE := 30
+const TILT := 30
+const HOLD := 60
+
+var COLS := 8
+var ROWS := 8
 var phi := rad_to_deg(atan(SimConst.MATERIALS[1].mu_s))
 var solvers: Array[GpuSolver] = []
 var thetas := [phi - 2.0, phi + 2.0]
-var x0: Array[float] = []
+var x_hold: Array[float] = [0.0, 0.0]
+var v_mid: Array[float] = [0.0, 0.0]
 
 
 func setup() -> void:
-	ROWS = int(args.get("rows", 8))
-	COLS = int(args.get("cols", 8))
+	ROWS = int(args.get("rows", ROWS))
+	COLS = int(args.get("cols", COLS))
 	if args.has("deg"):
 		thetas = [float(args.deg), float(args.deg) + 4.0]
 	for th in thetas:
-		make_solver(256, Vector2(2.0, 0.3), int(args.get("sub", SimConst.SUBSTEPS)))
-		solver.gravity = SimConst.G * Vector2(sin(deg_to_rad(th)), -cos(deg_to_rad(th)))
+		make_solver(256, Vector2(2.0, 0.3))
 		var b := Spawn.bonded_block(COLS, ROWS, Vector2(0.2, 0.0), 1, Spawn.SORBET[solvers.size()], 7)
-		if args.get("rigid", "1") == "1":
-			solver.spawn_piece(0, 0, b, Vector2(0.2, 0.0), Vector2.ZERO)
-		else:
-			solver.write_set(0, b)
+		solver.spawn_piece(0, GpuSolver.slot_range(0, b.size()), b, Vector2(0.2, 0.0), Vector2.ZERO)
 		solvers.append(solver)
-		x0.append(_mean_x(b.x, b.size()))
 
 
 func tick() -> bool:
-	for s in solvers:
+	for k in 2:
+		var s := solvers[k]
+		var tilt := clampf(float(frame - SETTLE) / TILT, 0.0, 1.0)
+		var th := deg_to_rad(thetas[k]) * tilt
+		s.gravity = SimConst.G * Vector2(sin(th), -cos(th))
 		s.step()
+		if frame + 1 == SETTLE + TILT:
+			x_hold[k] = _body(s).x
+		if frame + 1 == SETTLE + TILT + HOLD / 2:
+			v_mid[k] = _body(s).z
 	frame += 1
-	return frame >= 60
+	return frame >= SETTLE + TILT + HOLD
+
+
+## Body state of piece 0: (x, y, vx, vy).
+func _body(s: GpuSolver) -> Vector4:
+	var rb := s.read_body(0)
+	return Vector4(rb[0], rb[1], rb[4], rb[5])
 
 
 func result() -> Dictionary:
 	var out := {"phi_deg": snappedf(phi, 0.01)}
 	var ok := true
+	var mu_k: float = SimConst.MATERIALS[1].mu_k
 	for k in 2:
 		var s := solvers[k]
-		var n := COLS * ROWS - ROWS / 2
-		var dx := _mean_x(s.read_positions(), n) - x0[k]
+		var b := _body(s)
+		var dx := b.x - x_hold[k]
 		var th := deg_to_rad(thetas[k])
-		var mu_k: float = SimConst.MATERIALS[1].mu_k
-		var expect := maxf(0.0, 0.5 * SimConst.G * (sin(th) - mu_k * cos(th)))
+		var a_expect := maxf(0.0, SimConst.G * (sin(th) - mu_k * cos(th)))
+		# Mean acceleration over the second half of the hold.
+		var a := (b.z - v_mid[k]) / (HOLD / 2 * SimConst.DT)
 		var slides := dx > 2.0 * SimConst.R
 		ok = ok and slides == (k == 1)
-		var pos := s.read_positions()
-		var rows := []
-		var idx := 0
-		for row in ROWS:
-			var m := 0.0
-			var cnt := COLS - (row % 2)
-			for c in cnt:
-				m += pos[idx].x
-				idx += 1
-			rows.append(snappedf(m / cnt, 0.0001))
-		out["rows_x_%d" % k] = rows
-		# Block tilt from bottom-row end points.
-		var a0 := pos[0]
-		var a1 := pos[COLS - 1]
-		out["tilt_deg_%d" % k] = snappedf(rad_to_deg((a1 - a0).angle()), 0.01)
-		out["theta_%d" % k] = {"deg": snappedf(thetas[k], 0.01), "dx_m": snappedf(dx, 0.0001),
-			"expected_slide_m": snappedf(expect, 0.0001) if k == 1 else 0.0, "slides": slides,
-			"broken": s.read_stats().broken}
-	if args.get("dbg", "0") == "1":
-		var s1 := solvers[1]
-		out["rb"] = Array(s1.read_floats("rb", 0, 64))
-		var fr := s1.read_floats("fric", 0, 16 * 4)
-		out["fric0_3"] = Array(fr)
-		out["d_pen_bottom"] = s1.read_positions()[0].y - SimConst.R
+		if k == 1:
+			ok = ok and absf(a - a_expect) < 0.15 * a_expect
+		out["theta_%d" % k] = {"deg": snappedf(thetas[k], 0.01), "dx_m": snappedf(dx, 0.0001), "slides": slides,
+			"accel": snappedf(a, 0.001), "expected_accel": snappedf(a_expect, 0.001), "broken": s.read_stats().broken}
 	out["pass"] = ok
 	return out
-
-
-func _mean_x(p: PackedVector2Array, n: int) -> float:
-	var m := 0.0
-	for i in n:
-		m += p[i].x
-	return m / n
 
 
 func cleanup() -> void:

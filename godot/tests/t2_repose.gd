@@ -1,6 +1,6 @@
 extends SimTest
 ## T2: pour three streams (3 seeds) onto a plane; fitted flank slope must be within
-## ±3° of the material's configured repose angle (atan mu_s = 32° for sand).
+## ±3° of dry sand's angle of repose (SimConst.REPOSE_DEG = 32°).
 
 const SLOTS := 3
 const SLOT_W := 3.0
@@ -16,7 +16,7 @@ var stats := {}
 
 
 func setup() -> void:
-	make_solver(SLOTS * PER_HEAP, Vector2(SLOTS * SLOT_W, 1.2), 32)
+	make_solver(SLOTS * PER_HEAP, Vector2(SLOTS * SLOT_W, 1.2))
 	for k in SLOTS:
 		pos_x.append((k + 0.5) * SLOT_W)
 		rngs.append(Spawn.rng_for(int(args.get("seed", 1)) * 100 + k))
@@ -47,7 +47,7 @@ func result() -> Dictionary:
 	stats = solver.read_stats()
 	var pos := solver.read_positions()
 	var ok := true
-	var target := rad_to_deg(atan(SimConst.MATERIALS[0].mu_s))
+	var target := SimConst.REPOSE_DEG
 	for k in SLOTS:
 		var a := _fit(pos.slice(k * PER_HEAP, (k + 1) * PER_HEAP), pos_x[k])
 		angles.append(a)

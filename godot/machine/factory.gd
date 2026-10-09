@@ -2,8 +2,9 @@ class_name Factory
 extends Machine
 ## The kinetic line (world 12.288 × 6.912 m, y up), one closed loop:
 ## inclined bucket elevator (left) → head chute → belt A → press → two-stage
-## shredder → mixer bowl → floor with a chain-driven pusher blade ─┬─ left: elevator pit
-##                                                                 └─ right: furnace (glow, burn)
+## shredder → mixer bowl → floor swept by a ram (telescopic cylinder from the
+## furnace wall) ─┬─ left: elevator pit
+##                └─ right: furnace (glow, burn)
 
 const WORLD := Vector2(12.288, 6.912)
 const S := 0.016  # legacy plan scale (T5 geometry)
@@ -18,6 +19,10 @@ const OUTLET_A1 := 220.3
 const Y_A := 5.20
 const Y_FLOOR := 0.90
 const ELEV_SPEED := 0.5
+## Pusher head (car-piston sized: 32 × 34 cm), sweep period and telescopic stages.
+const PUSHER_HALF := Vector2(0.16, 0.17)
+const PUSHER_PERIOD := 18.0
+const STAGES := 6
 
 var belt_top := Y_A
 var spawn_at := Vector2(4.5, Y_A + 0.08)
@@ -26,6 +31,9 @@ var bowl_r := 0.85
 var rotor_body := 0
 var press_body := 0
 var pusher_body := 0
+var stages: Array[int] = []
+var stage_len := 1.0
+var barrel := Rect2()
 var rollers: Array[int] = []
 var buckets: Array[int] = []
 # Leaning ~24° right: the empty return strand moves out from under the head, so
@@ -37,24 +45,72 @@ var floor_x := Vector2(1.5, 10.2)
 var furnace := Rect2(10.0, 0.2, 2.2, 2.2)
 ## Station label anchors (world m).
 var stations := {}
+## Map: "factory" (rotor mixer) or "galton" (Galton board with bins and a slide gate).
+var map := "factory"
+## Galton map: x of the bin centres, bins' bottom/top, gate body.
+var bin_x: Array[float] = []
+var bins := Rect2()
+var gate_body := 0
 
 
-func _init() -> void:
+func _init(map_name := "factory") -> void:
 	super()
 	world = WORLD
+	map = map_name
 	_elevator()
 	conveyor(3.95, 7.8, Y_A, BELT_SPEED)
 	_press()
 	_shredder()
-	rotor_body = build_bowl(self, bowl_c, bowl_r)
+	if map == "galton":
+		_galton()
+	else:
+		rotor_body = build_bowl(self, bowl_c, bowl_r)
 	_pusher()
 	_furnace()
 	stations = {
 		"01 / FORMEN": Vector2(4.3, 5.75), "02 / PRESSE": Vector2(5.65, 6.6),
-		"03 / MAHLWERK": Vector2(9.4, 4.8), "04 / MISCHEN": Vector2(9.4, 3.0),
+		"03 / MAHLWERK": Vector2(9.4, 4.8), "04 / MISCHEN" if map != "galton" else "04 / GALTONBRETT": Vector2(9.4, 3.0),
 		"05 / SCHIEBER": Vector2(4.6, 1.45), "06 / OFEN": Vector2(10.35, 2.75), "07 / AUFZUG": Vector2(2.6, 3.0),
 	}
 	update(0.0)
+
+
+## Galton board under the shredder: 12 rows of pegs (each grain bounces left or
+## right at every row), 13 bins below where the sand stacks up into a binomial
+## (bell) profile, and a slide gate under the bins that opens every few seconds
+## and drops the whole distribution onto the floor for the ram.
+func _galton() -> void:
+	var top := Vector2(bowl_c.x, 3.18)
+	var dx := 0.09
+	var dy := dx * sqrt(3.0) * 0.5
+	var rows := 12
+	for r in rows:
+		for k in r + 1:
+			var p := top + Vector2((k - r * 0.5) * dx, -r * dy)
+			add_prim(0, CIRCLE, [0.017], p, 0.0, 1, 0, 0.0, "peg")
+	# Funnel walls along the triangle's flanks keep the stream on the board.
+	var wing := Vector2(0.5 * dx * rows + 0.07, -dy * rows)
+	add_segment(top + Vector2(-0.12, 0.12), top + Vector2(-wing.x, wing.y), 0.015)
+	add_segment(top + Vector2(0.12, 0.12), top + Vector2(wing.x, wing.y), 0.015)
+	# Bins: dividers under the gaps of the last peg row, down to the gate.
+	var y_bot := 1.48
+	var y_top := top.y - dy * rows - 0.03
+	var n_bins := rows + 2
+	var x0 := top.x - (n_bins - 1) * 0.5 * dx
+	bin_x.clear()
+	for k in n_bins + 1:
+		var x := x0 + (k - 0.5) * dx
+		add_segment(Vector2(x, y_bot + 0.004), Vector2(x, y_top if k > 0 and k < n_bins else top.y - dy * (rows - 1)), 0.006)
+		if k < n_bins:
+			bin_x.append(x0 + k * dx)
+	bins = Rect2(x0 - 0.5 * dx, y_bot, n_bins * dx, y_top - y_bot)
+	# Slide gate: a plate under the bins (top face at y_bot, a wiper seal under the
+	# dividers) that slides left out from under them.
+	var half := Vector2(bins.size.x * 0.5 + 0.03, 0.02)
+	var travel := bins.size.x + 0.1
+	gate_body = add_body(Vector2(bins.get_center().x - travel, y_bot - half.y), 0.0, "gate")
+	gate(gate_body, Vector2(1.0, 0.0), travel, 18.0, 0.7, 1.6)
+	add_prim(gate_body, BOX, [half.x, half.y, 0.002], Vector2.ZERO, 0.0, 1, 0, 0.0, "piston")
 
 
 func _elevator() -> void:
@@ -88,10 +144,21 @@ func _elevator() -> void:
 	# Feed plate (43°) from the floor end down into the pit, outside the bucket sweep.
 	var pit_end := b + nrm * pit
 	add_segment(Vector2(floor_x.x + 0.1, Y_FLOOR - 0.04), pit_end, 0.02)
+	# Casing: straight walls continuing the pit arc up both strands, so spill from
+	# the climbing buckets stays inside and slides back into the pit (a real bucket
+	# elevator runs enclosed). Openings: below the right wall for the floor feed,
+	# above it for the discharge onto the head chute.
+	var up := u
+	var left0 := b - nrm * pit
+	add_segment(left0, left0 + up * ((t - b).length() + 0.25), 0.025)
+	var right0 := b + nrm * pit
+	var s_lo := (1.6 - right0.y) / up.y
+	var s_hi := (5.3 - right0.y) / up.y
+	add_segment(right0 + up * s_lo, right0 + up * s_hi, 0.025)
 	# Head chute onto belt A (37°), ≥ 5 cm clear of the return-strand buckets and cleats.
 	add_segment(Vector2(3.62, 5.74), Vector2(4.15, 5.33), 0.02)
 	# Floor drain: spill that misses every machine is recycled (counted on sink 3).
-	add_sink(Vector2(0.0, -0.1), Vector2(WORLD.x, 0.04), 3)
+	add_sink(Vector2(0.0, -0.1), Vector2(WORLD.x, 0.12), 3)
 
 
 ## Belt slab (friction drive on its top face) plus cleats that circulate around
@@ -138,7 +205,7 @@ func _shredder() -> void:
 	var n1 := Vector2(8.4, 4.6)
 	_roller_pair(n1, 0.20, 0.27, 0.26, 10, Vector3(0.045, 0.028, 0.01), 2.4)
 	# Left guide catches spray under the belt end and leads it into the hopper.
-	add_path(PackedVector2Array([Vector2(7.2, 5.04), Vector2(7.8, 4.6), Vector2(7.8, 4.35)]), 0.02)
+	add_path(PackedVector2Array([Vector2(7.3, 4.95), Vector2(7.8, 4.6), Vector2(7.8, 4.35)]), 0.02)
 	# Housing: hood over the rollers closed down the right side (no spray escapes).
 	add_path(PackedVector2Array([Vector2(8.0, 5.66), Vector2(9.25, 5.66), Vector2(9.25, 5.35), Vector2(8.995, 4.85), Vector2(8.995, 4.35)]), 0.02)
 	add_segment(Vector2(7.8, 4.35), Vector2(8.25, 3.9), 0.02)
@@ -186,21 +253,41 @@ static func build_mixer(m: Machine, c: Vector2, r: float, chute := true) -> int:
 
 
 func _pusher() -> void:
-	# A heavy pusher blade on a telescopic cylinder sweeps the whole floor without
-	# ever stopping: sand from the outlet ahead of it is shoved right into the
-	# furnace, sand that falls behind it while it is on the furnace side is shoved
-	# left into the elevator pit. It runs slower on the furnace side (phase
-	# modulation a = 0.643), so it is right of the outlet exactly half the time:
-	# a 50/50 split.
+	# Ram feeder: a heavy piston head on a six-stage hydraulic telescopic cylinder
+	# whose barrel sits in the furnace's right wall. It sweeps the whole floor
+	# without ever stopping: going left it shoves sand into the elevator pit, going
+	# right into the furnace. Sand from the outlet lands on the side of the head
+	# that faces the outlet; the stroke is phase-modulated so the head is left of
+	# the outlet exactly half the time: a 50/50 split. Every stage collides.
 	add_segment(Vector2(floor_x.x, Y_FLOOR), Vector2(floor_x.y, Y_FLOOR), 0.025)
-	var half := Vector2(0.045, 0.13)
-	var y := Y_FLOOR + 0.025 + 0.003 + half.y
-	var x0 := floor_x.x + 0.18
-	var stroke := floor_x.y - 0.08 - x0
-	pusher_body = add_body(Vector2(x0, y), 0.0, "pusher")
-	var outlet := (bowl_c.x - x0) / stroke
-	piston_swept(pusher_body, Vector2(1.0, 0.0), stroke, 16.0, _split_modulation(outlet))
-	add_prim(pusher_body, BOX, [half.x, half.y, 0.003], Vector2.ZERO, 0.0, 1, 0, 0.0, "piston")
+	var half := PUSHER_HALF
+	# Sole 1 mm into the floor plate: a wiper seal, nothing passes underneath.
+	var y := Y_FLOOR + 0.025 - 0.001 + half.y
+	var home := Vector2(floor_x.y + 0.02 + half.x, y)
+	var stroke := home.x - (floor_x.x + 0.04 + half.x)
+	pusher_body = add_body(home, 0.0, "pusher")
+	var outlet := (home.x - bowl_c.x) / stroke
+	piston_swept(pusher_body, Vector2(-1.0, 0.0), stroke, PUSHER_PERIOD, _split_modulation(outlet))
+	# Sharp edges (2 mm): a rounded sole would wedge grains into the floor and pop them out.
+	add_prim(pusher_body, BOX, [half.x, half.y, 0.002], Vector2.ZERO, 0.0, 1, 0, 0.0, "piston_head")
+	# Barrel (static) from the retracted head to the furnace wall.
+	var a := home.x + half.x + 0.04
+	barrel = Rect2(a, y - 0.108, furnace.end.x - a, 0.216)
+	add_prim(0, BOX, [barrel.size.x * 0.5, 0.108, 0.002], barrel.get_center(), 0.0, 1, 0, 0.0, "barrel")
+	# Stages, thickest first: stage k spans [x_k, x_k + L] with
+	# x_k = a + (h - a) (k + 1) / N, h = head's right face (the last stage carries the head).
+	var n := STAGES
+	var l := minf(barrel.size.x - 0.05, stroke / n + 0.12)
+	stage_len = l
+	stages.clear()
+	for k in n:
+		# 3 mm steps between stages (less than a grain radius): grains on the rod
+		# ride over the moving shoulders instead of being wedged against them.
+		var hh := 0.105 - 0.003 * k
+		var body := add_body(Vector2(a + l * 0.5, y), 0.0, "stage")
+		follow(body, pusher_body, Vector2(a, y), Vector2(half.x, 0.0), float(k + 1) / n, Vector2(l * 0.5, 0.0))
+		add_prim(body, BOX, [l * 0.5, hh, 0.01], Vector2.ZERO, 0.0, 1, 0, 0.0, "stage")
+		stages.append(body)
 
 
 ## Phase modulation a such that x = (1 - cos(τ + a sin τ)) / 2 exceeds `outlet`
@@ -213,12 +300,47 @@ func _furnace() -> void:
 	var f := furnace
 	add_segment(Vector2(f.position.x, f.position.y), Vector2(f.end.x, f.position.y), 0.03)
 	add_segment(Vector2(f.position.x, f.position.y - 0.03), Vector2(f.position.x, Y_FLOOR - 0.03), 0.03)
-	add_segment(Vector2(f.position.x + 0.3, Y_FLOOR + 0.4), Vector2(f.position.x + 0.3, f.end.y), 0.03)
+	add_segment(Vector2(f.position.x + 0.3, Y_FLOOR + 0.46), Vector2(f.position.x + 0.3, f.end.y), 0.03)
 	add_segment(Vector2(f.end.x, f.position.y - 0.03), Vector2(f.end.x, f.end.y), 0.03)
 	add_segment(Vector2(f.position.x + 0.3, f.end.y), Vector2(f.end.x, f.end.y), 0.03)
-	add_heat(Vector2(f.position.x + 0.05, f.position.y + 0.02), Vector2(f.end.x - 0.05, 1.2), 2)
+	add_heat(Vector2(f.position.x + 0.05, f.position.y + 0.02), Vector2(f.end.x - 0.05, 1.75), 2)
 	# Chimney (drawn only).
 	add_prim(0, BOX, [0.2, 2.25, 0.0], Vector2(f.end.x - 0.55, f.end.y + 2.25), 0.0, 1, FLAG_VISUAL, 0.0, "wall")
+
+
+## Initial sand: the mixer bowl, or the Galton bins stacked to a binomial profile.
+func prefill(n: int, rng: RandomNumberGenerator) -> ParticleSet:
+	if map != "galton":
+		return fill_bowl(self, bowl_c, bowl_r, n, rng)
+	var s := ParticleSet.new()
+	var g := SimConst.R_MAX * 1.02
+	var dy := 2.0 * g * sqrt(3.0) * 0.5
+	var rows := bin_x.size() - 1
+	var pmf: Array[float] = []
+	var peak := 0.0
+	for k in bin_x.size():
+		# Binomial(rows, 1/2) via the log-gamma-free product form.
+		var c := 1.0
+		for j in k:
+			c = c * (rows - j) / (j + 1)
+		pmf.append(c / pow(2.0, rows))
+		peak = maxf(peak, pmf[k])
+	var area := 0.0
+	for p in pmf:
+		area += p / peak
+	var per_bin_h := minf(bins.size.y * 0.8, n * PI * g * g / 0.85 / (area * 0.09))
+	for k in bin_x.size():
+		var h := per_bin_h * pmf[k] / peak
+		var row := 0
+		var y := bins.position.y + g
+		while y < bins.position.y + h and s.size() < n:
+			var x := bin_x[k] - 0.045 + 0.006 + g + (g if row % 2 == 1 else 0.0)
+			while x < bin_x[k] + 0.045 - 0.006 - g:
+				s.add(Vector2(x, y), Spawn.grain_radius(rng), GpuSolver.info_word(1, 0), Spawn.vary(Spawn.SORBET[k % 6], rng))
+				x += 2.0 * g
+			y += dy
+			row += 1
+	return s
 
 
 ## Loose hex fill of the lower bowl, clear of all colliders. Left half palette

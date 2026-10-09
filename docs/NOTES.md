@@ -5,45 +5,47 @@ Overwritten as decisions change; not a log. Read this first on resume.
 ## Versions / environment
 - Godot 4.7.1.stable (a13da4feb), Metal 4.0, Forward+, Apple M4. ffmpeg (Homebrew) for encoding.
 - GPU work needs a window *and an unlocked desktop*: macOS throttles hidden/locked Metal windows to ~1 fps, and no local RenderingDevice exists with `--headless`. Batch windows run always-on-top.
-- The display caps windows at 120 Hz even with vsync off → benchmarks use `spf=N` (N sim frames per display frame).
+- The display caps the window at its refresh rate even with vsync off → timings use `spf=N` (N sim frames per display frame); `ms_per_frame` in traces is per sim frame.
+- zsh does not word-split `$var`: loop over argument strings with `eval`.
 
 ## How to run
 - Lint (GDScript + shader compile): `godot/tools/lint.sh`
-- Machine clearance audit (headless): `godot --headless --path godot --script res://tools/clearance.gd`
-- One scene: `godot/tools/run.sh <scene> k=v ...` (prints JSON lines). Factory: `res://render/main.tscn` (`frames=N`, `shot=/abs.png shots=a,b`, `full=1`, `trace=1`, `t8=1`, `save_state=`, `load_state=`, `wallpaper=1 fps=30`).
-- All tests: `godot/tests/run_all.sh` (summary table; results in /tmp/koalasandpaper_tests.jsonl).
-- 4K capture: `godot/tools/capture.sh 30 renders/state.bin` → `renders/kinetic_study_001_4k.mp4`.
+- Machine audit (headless): `godot --headless --path godot --script res://tools/clearance.gd -- map=factory|galton`
+- Factory: `godot/tools/run.sh res://render/main.tscn` (`map=galton`, `frames=N`, `trace=1`, `spf=N`, `shots=a,b shot=/abs.png full=1`, `t8=1`, `save_state=`/`load_state=`, `skip=kernel+kernel`, `hide=layer+layer`, `wallpaper=1 fps=30`, `max_active=N`).
+- Tests: `godot/tests/run_all.sh`; sand quality: `tools/run.sh res://tests/runner.tscn t=q_sand case=collapse|impact|push`.
 
-## Solver (godot/sim) — XPBD on the main RenderingDevice
-Per substep (48 per 1/60 s frame): `rigid_predict` → `integrate` → `contacts` → `rigid_solve` → `finalize` → `velocity`.
-- State: X (positions), D (substep displacement, kept separate so v = D/h keeps float32 precision), V; packed XD/XV for neighbour reads; INFO = material | kind | radius code (8 bit) | heat (8 bit).
-- Grid: cell 2·r_max, fixed bins (CELL_CAP 4, overflow counted), double-buffered by substep parity so clearing never races with reads.
-- `integrate`: applies the pre-stabilisation shift (position only), predicts (gravity / rigid pose), clamps to 0.5 r (counted), bins.
-- `contacts` (Jacobi, constraint groups in order, Macklin 2014 §4.3): particle contacts with Coulomb friction (eq. 24) and shock-propagation mass bias exp(k·Δy/R), k = 0.13; bonds (XPBD distance, break on strain 0.12, on lost partner/fragment change). Averaging: N_eff = Σ|c|/max|c| (zero-proposing constraints don't dilute friction). Then machine surfaces + walls projected sequentially (Gauss-Seidel) on the result.
-- `rigid_solve` (one 64-thread workgroup per piece): intact pieces are rigid bodies; grain corrections → impulse response for point contacts blended with the least-squares rigid motion for extended contacts; Coulomb friction decided per piece (mean slip vs mean cone); a body pinched beyond 0.3 R for 4 substeps shatters into its bond net; laser (removed from the factory) splits bodies.
-- `finalize`: X += D (or rigid pose), velocity → XV, sinks, heat zones (glow +1/8 substeps, burn at 250, cool −1/24).
-- `velocity` (Müller 2020 §3.6): closed contacts get relative normal velocity −e·v_pre (e = 0.03, 0 below 2gh) → no popping/compression waves; same loop computes the next pre-stabilisation shift (Macklin 2014 §4.4).
-- Machine colliders: SDF prims (circle, capsule, box, arc; polar repeat; belt surface speed on the top face only), poses from analytic motion profiles with finite-difference velocities; coarse CPU-built prim grid (0.4 m cells).
+## Solver (godot/sim) — DEM on the main RenderingDevice
+Why DEM: the earlier XPBD/Jacobi solver had friction capacity independent of depth (per-substep corrections, not load), so bulk sand flowed like a light fluid around blades, crept (0.3 R/s at rest) and turned overlap into velocity. DEM (Cundall & Strack 1979; Luding 2008) gives load-dependent friction, real inertia, no creep.
+- Contact: linear spring-dashpot normal (k from contact time t_c = 7 steps, no tension), tangential spring with memory, Coulomb on the elastic shear with static/kinetic hysteresis; dashpots implicit in the grain's own velocity (explicit ones went unstable with many stiff contacts: bonded lattices burst). Non-rotating discs.
+- Per frame: `dem_order` ×4 (count/scan/scatter grains into 9 cm blocks → spatial visit order; carry contact histories to the new visit slots), then 48 × `dem_step` (fused: forces, integration, zones, grid insert, render), `dem_rigid` every 4 steps.
+- Grid: bins of packed grain data (pos, half-float vel, id|radius|kind|material), two halves stamped by step (count word = stamp<<8 | n; stale = empty; no clear pass).
+- Contact history (keys + float32 springs) lives in visit-slot order (coalesced); float32 because per-step increments (~1e-7 R) vanish in half floats.
+- Rigid pieces: multi-sphere bodies integrated inline in `dem_step` (every grain recomputes its body state identically; the leader grain stores it), forces summed per SIMD group then float `atomicAdd` into triple-buffered accumulators. Crush = force pushing from both sides (max over 4 directions of min(Σ+, Σ−)) > max(300 grain weights, 3 body weights) for 4 steps → piece breaks into ≤5 rigid chunks, chunk crumbles to sand. Fast trigger matters: every step of delay is overlap released explosively.
+- Pieces may occupy any free slots (per-piece slot lists + `dem_spawn` scatter): contiguous allocation fragmented as sand burns and grew the slot range without bound.
+- Colliders: SDF prims with analytic gradients; per-prim world AABB culling; coarse CPU grid 0.2 m (static part cached).
 
-## Scale
-- R = 5 mm (±10 % radius spread), SI, y up. The brief's 1–2 mm is infeasible with the hard 0.5 r/substep rule (max speed = 0.5 r·60·N_sub; 48 substeps → 4.8 m/s at R = 5 mm). World 12.288 × 6.912 m ≈ 1229 × 691 grain diameters ≈ 3 px per grain at 4K.
+## Calibration (sand μ = 0.35, e = 0.1, R = 5 mm ±10 %, 48 steps)
+- Repose (T2) 31–34° (dry sand 32°). Column collapse a = 2: (L∞−L0)/L0 = 2.4 (Lube 2005: 1.2 a). Rest jitter 0.0 R/s.
+- Silo (T4): Beverloo fit within 1 %, k ≈ 2.5; orifices ≥ 8 d (6 d arches and jams, as in 2D experiments).
+- Pieces/steel μ = 0.625 (single coefficient; per-contact μs/μk hysteresis made rigid blocks fail progressively below atan μs).
+- 64 or 96 steps change no test result; 48 is the cheapest that keeps them.
 
 ## Factory (godot/machine/factory.gd), one loop
-Inclined bucket elevator (left, 24° lean so the empty return strand clears the head; buckets fixed to the chain, mouth in travel direction, gravity discharge, 0.5 m/s) → 37° head chute → belt A (cleated, 0.45 m/s; tetromino pieces spawn every 3 s) → press (17 cm above belt: tall pieces shatter) → shredder (2 roller pairs, tops running into the nip, 5 cm gaps) → mixer (3-blade rotor, bottom outlet ±12°) → floor with one heavy pusher on a continuous phase-modulated stroke (right of the outlet exactly half the time → 50/50) → left: elevator pit / right: furnace (heat zone). Floor drain recycles spill. `tools/clearance.gd` keeps every moving part ≥ 3 cm from static geometry (gaps < 8 mm are seals).
+Enclosed inclined bucket elevator (casing walls continue the pit arc; spill stays inside) → head chute → belt A (pieces every 3 s while < 15 000 grains in the line) → press → two-stage shredder → mixer (map factory) or Galton board + bins + slide gate (map galton) → ram feeder (piston head 32×34 cm on a 6-stage telescopic cylinder from the furnace wall, phase-modulated so it is left of the outlet half the time: 50/50) → left: pit, right: furnace. Design rules learnt: no rounded edges sliding on floors (wedge-ejects grains), telescopic shoulders < grain radius, wiper seals (sole/gate 1 mm into the plate) instead of gaps.
 
-## Test status (last full run before the screen locked; see run_all.sh)
-- T1 free fall: PASS (rel err 0.023 % at 80 substeps).
-- T2 repose: PASS (30.3/31.4/31.9° and 33.1/29.9/31.3° vs 32°).
-- T3 incline (rigid 8×10 block): PASS (30° static 0.0 m; 34° slides 0.5838 m vs 0.5808 m analytic).
-- T4 silo, T5 mixer (new geometry), T6 shredding, T7 conveyor, T8 conservation, pusher: written, not yet run (screen locked).
-- Clearance audit: PASS (min open gap 3.95 cm).
-- T9 perf (48 substeps): 16k grains 5.2 ms/sim frame, 64k 32.3 ms. Factory (~20k grains + render) ≈ 50–60 fps uncapped.
+## Performance (M4, factory ~15 k grains)
+- ~8–9 ms per sim frame incl. render share; real time is display-capped at 60 fps. Was ~30 ms at the start of the DEM work.
+- Steps: 96 → 48; fused kernel; machine drawing cached per moving part (was ~9 ms/frame of GDScript); visible instances = used slots; static collider grid cached.
+- Remaining cost: ~10 ns per grain-step in dense heaps (contact model ~½). No memory growth over 2 min (objects, RAM, VRAM constant); GPU memory ~580 MB (grid bins 135 MB).
+
+## Test status (last run, 48 steps)
+- PASS: T1 free fall (0.01 %), T2 repose 32–35°, T3 tilting plane (30° holds, 34° accelerates at exactly g(sinθ−μcosθ)), T4 Beverloo (2.4 %), T5 mixer (p99 1.8 m/s), T6 shredding (all to sand, none inside rollers), T7 conveyor, pusher (no grain past the sole), column collapse 2.36 (Lube: 2.4), factory clearance + no-touch audit.
+- Pending (screen locked during the last run): T8 120 s conservation (previous run: balance 0, nan 0, oob 0 after the crush fix), T9 benchmark, Galton map audit.
+- Visuals added last, not yet looked at on screen: contact-count ambient occlusion in particles.gdshader.
 
 ## Known issues / next
-- Free-fall spill from the elevator head and long drops exceed 4.8 m/s → speed clamps counted (no tunnelling observed).
-- Perf at 64k is memory-bound (neighbour gathers): next step is periodic spatial reordering of free grains.
-- Jam/torque limits not modelled (motors are ideal kinematic drives).
-- macOS wallpaper = looped video via a third-party wallpaper app or `wallpaper=1` fullscreen window.
+- Sand riding on the ram rod collects at the barrel mouth inside the furnace (burns there).
+- Wallpaper: macOS has no video wallpaper; use the rendered loop with a third-party app or `wallpaper=1`.
 
 ## Owner preferences (from feedback)
-One readable loop, no hidden "fields": mechanisms must be visible (pistons, cleats, buckets). Pistons never pause. Rollers feed the nip. No laser. Minimal splash. Real-time speeds.
+One readable loop, mechanisms visible (no hidden fields), pistons never pause and are thick (engine-piston look, driven from the furnace side), rollers feed the nip, no laser, minimal splash, real-time speeds, no parts touching, pieces must not break on landing, performance matters; maps: more variants, e.g. Galton board.

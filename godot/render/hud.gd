@@ -24,8 +24,8 @@ func setup(f: Factory, px_per_m: float) -> void:
 	root.set_anchors_preset(Control.PRESET_FULL_RECT)
 	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(root)
-	_label(root, "KOALASANDPAPER", Vector2(4.25, 6.64), 0.16, INK)
-	_label(root, "KINETIC STUDY 001", Vector2(4.25, 6.42), 0.09, DIM)
+	_label(root, "KOALASANDPAPER", Vector2(6.75, 6.64), 0.16, INK)
+	_label(root, "KINETIC STUDY 001", Vector2(6.75, 6.42), 0.09, DIM)
 	var lines := Lines.new()
 	lines.hud = self
 	root.add_child(lines)

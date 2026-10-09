@@ -37,36 +37,81 @@ float prim_sdf(Prim pr, vec2 q) {
 	return (pr.head.w & 1u) != 0u ? -d : d;
 }
 
-// t: pose time (substep end for the solve, substep start for stabilisation).
-// stab: position-only push-out, no friction, no surface motion.
-void collider_contacts(float t, bool stab, float rad, vec4 mi, inout Surf su) {
-	uint cell = pgrid_cell(su.p);
-	uint cnt = PGRID[cell];
-	for (uint gi = 1u; gi <= cnt; gi++) {
-		Prim pr = PRIMS[PGRID[cell + gi]];
-		if ((pr.head.w & 14u) != 0u) continue;  // sink/heat zone or visual-only: no collision
-		vec2 bpos, bvel;
-		float bang, bom;
-		body_pose(pr.head.y, t, bpos, bang, bvel, bom);
-		vec2 rp = su.p - bpos;
-		if ((pr.head.w & 1u) == 0u && dot(rp, rp) > (pr.surf.z + rad) * (pr.surf.z + rad)) continue;
-		vec2 q = rot(-bang) * rp;
-		float d = prim_sdf(pr, q);
-		if (d >= rad) continue;
-		float e = 0.05 * rad;
-		vec2 g = vec2(prim_sdf(pr, q + vec2(e, 0.0)) - prim_sdf(pr, q - vec2(e, 0.0)),
-				prim_sdf(pr, q + vec2(0.0, e)) - prim_sdf(pr, q - vec2(0.0, e)));
-		float gl = length(g);
-		if (gl < 1e-12) continue;
-		vec2 n = rot(bang) * (g / gl);
-		if (stab) {
-			su.p += n * (rad - d);
-			continue;
-		}
-		vec2 vs = bvel + bom * vec2(-rp.y, rp.x);
-		// Belt drive acts on the carrying (upper, flat) face only.
-		vec2 up = rot(bang) * rot(pr.xf.z) * vec2(0.0, 1.0);
-		if (dot(n, up) > 0.9) vs += pr.surf.w * vec2(up.y, -up.x);
-		surface_contact(n, rad - d, vs * pc.h, 0.5 * (mi.x + pr.surf.x), 0.5 * (mi.y + pr.surf.y), su);
+// Signed distance and its exact gradient (unit, body-local frame) in one pass.
+float prim_sdf_grad(Prim pr, vec2 q, out vec2 g) {
+	float ks = 0.0;
+	if (pr.head.z > 1u) {
+		float sector = 6.28318530718 / float(pr.head.z);
+		ks = round((atan(q.y, q.x) - pr.xf.w) / sector) * sector;
+		q = rot(-ks) * q;
 	}
+	q = rot(-pr.xf.z) * (q - pr.xf.xy);
+	float d;
+	uint type = pr.head.x;
+	if (type == PRIM_CIRCLE) {
+		float l = max(length(q), 1e-12);
+		d = l - pr.shape.x;
+		g = q / l;
+	} else if (type == PRIM_CAPSULE) {
+		q.x -= clamp(q.x, -pr.shape.x, pr.shape.x);
+		float l = max(length(q), 1e-12);
+		d = l - pr.shape.y;
+		g = q / l;
+	} else if (type == PRIM_BOX) {
+		vec2 e = abs(q) - pr.shape.xy + pr.shape.z;
+		vec2 sq = vec2(q.x < 0.0 ? -1.0 : 1.0, q.y < 0.0 ? -1.0 : 1.0);
+		if (max(e.x, e.y) > 0.0) {
+			vec2 o = max(e, 0.0);
+			float l = max(length(o), 1e-12);
+			d = l - pr.shape.z;
+			g = sq * o / l;
+		} else {
+			d = max(e.x, e.y) - pr.shape.z;
+			g = e.x > e.y ? vec2(sq.x, 0.0) : vec2(0.0, sq.y);
+		}
+	} else {
+		vec2 sc = vec2(sin(pr.shape.z), cos(pr.shape.z));
+		float sx = q.x < 0.0 ? -1.0 : 1.0;
+		q.x = abs(q.x);
+		if (sc.y * q.x > sc.x * q.y) {
+			vec2 o = q - sc * pr.shape.x;
+			float l = max(length(o), 1e-12);
+			d = l - pr.shape.y;
+			g = o / l;
+		} else {
+			float l = max(length(q), 1e-12);
+			d = abs(l - pr.shape.x) - pr.shape.y;
+			g = (l > pr.shape.x ? 1.0 : -1.0) * q / l;
+		}
+		g.x *= sx;
+	}
+	g = rot(ks) * (rot(pr.xf.z) * g);
+	if ((pr.head.w & 1u) != 0u) {
+		d = -d;
+		g = -g;
+	}
+	return d;
+}
+
+// Contact of a disc (centre p, radius rad) with prim pr at time t: unit normal n
+// (out of the surface), penetration pen > 0, surface velocity vs at the contact
+// (rigid motion plus belt surface speed on the carrying face). False: no contact.
+bool prim_contact(Prim pr, vec2 p, float t, float rad, out vec2 n, out float pen, out vec2 vs) {
+	n = vec2(0.0);
+	pen = 0.0;
+	vs = vec2(0.0);
+	vec2 bpos, bvel;
+	float bang, bom;
+	body_pose(pr.head.y, t, bpos, bang, bvel, bom);
+	vec2 rp = p - bpos;
+	vec2 g;
+	float d = prim_sdf_grad(pr, rot(-bang) * rp, g);
+	if (d >= rad) return false;
+	n = rot(bang) * g;
+	pen = rad - d;
+	vs = bvel + bom * vec2(-rp.y, rp.x);
+	// Belt drive acts on the carrying (upper, flat) face only.
+	vec2 up = rot(bang) * rot(pr.xf.z) * vec2(0.0, 1.0);
+	if (dot(n, up) > 0.9) vs += pr.surf.w * vec2(up.y, -up.x);
+	return true;
 }

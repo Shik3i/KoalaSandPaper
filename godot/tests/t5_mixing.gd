@@ -22,7 +22,7 @@ func setup() -> void:
 	rotor = Factory.build_bowl(machine, c, r, 0.0)
 	machine.add_sink(Vector2(0.0, -0.1), Vector2(4.0, 0.15), 1)
 	machine.update(0.0)
-	make_solver(N, Vector2(4.0, 3.4), int(args.get("sub", 48)))
+	make_solver(N, Vector2(4.0, 3.4))
 	var s := Factory.fill_bowl(machine, c, r, N, Spawn.rng_for(int(args.get("seed", 5))), float(args.get("top", 0.2)))
 	solver.write_set(0, s)
 	is_a.resize(s.size())

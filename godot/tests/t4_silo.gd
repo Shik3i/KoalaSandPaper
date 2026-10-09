@@ -1,5 +1,6 @@
 extends SimTest
-## T4: three flat-bottomed silos (orifice D = 6, 9, 12 grain diameters) discharge
+## T4: three flat-bottomed silos (orifice D = 8, 11, 14 grain diameters; below ~6 d
+## frictional 2D grains arch and jam, To et al. 2001) discharge
 ## into their own sinks. Steady flow rate W (between 20 % and 70 % discharged)
 ## must follow 2D Beverloo W = C (D - k d)^1.5: best-fit (C, k) with every silo
 ## within 15 %.
@@ -7,7 +8,7 @@ extends SimTest
 const N := 3500
 const W_SILO := 0.5
 const H_FLOOR := 0.35
-var widths := [0.06, 0.09, 0.12]
+var widths := [0.08, 0.11, 0.14]
 var xs := [0.5, 1.5, 2.5]
 var samples: Array = [[], [], []]
 
@@ -25,7 +26,7 @@ func setup() -> void:
 		machine.add_segment(Vector2(cx + half + 0.02, H_FLOOR), Vector2(r, H_FLOOR), 0.02)
 		machine.add_sink(Vector2(cx - 0.4, 0.0), Vector2(cx + 0.4, 0.2), k)
 	machine.update(0.0)
-	make_solver(3 * N, Vector2(3.0, 1.6), int(args.get("sub", 32)))
+	make_solver(3 * N, Vector2(3.0, 1.6))
 	var all := ParticleSet.new()
 	for k in 3:
 		# Orifice blocked during filling by spawning above it: grains settle first,

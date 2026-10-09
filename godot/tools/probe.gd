@@ -16,6 +16,7 @@ static func overlap(pos: PackedVector2Array, rad: PackedFloat32Array, info := Pa
 			g[k] = []
 		g[k].append(i)
 	var max_pen := 0.0
+	var max_at := Vector2.ZERO
 	var over := 0
 	var pairs := 0
 	for i in n:
@@ -35,10 +36,12 @@ static func overlap(pos: PackedVector2Array, rad: PackedFloat32Array, info := Pa
 					if d < d0:
 						pairs += 1
 						var pen := (d0 - d) / minf(rad[i], rad[j])
-						max_pen = maxf(max_pen, pen)
+						if pen > max_pen:
+							max_pen = pen
+							max_at = pos[i]
 						if pen > 0.25:
 							over += 1
-	return {"max_pen_r": snappedf(max_pen, 0.001), "pairs_over_quarter_r": over, "contacts": pairs}
+	return {"max_pen_r": snappedf(max_pen, 0.001), "max_at": max_at, "pairs_over_quarter_r": over, "contacts": pairs}
 
 
 static func extent(pos: PackedVector2Array, info := PackedInt32Array()) -> Rect2:

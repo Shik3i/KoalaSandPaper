@@ -12,9 +12,9 @@ const FLAG_SINK := 2
 const FLAG_VISUAL := 4
 ## Heat zone: grains inside heat up (glow) and burn (removed, counted on sink_id) when hot.
 const FLAG_HEAT := 8
-const MU := Vector2(0.6249, 0.5317)
+const MU := Vector2(0.6249, 0.6249)
 ## Coarse collider grid (CPU-built per frame): cell size and max prims per cell.
-const PCELL := 0.4
+const PCELL := 0.2
 const PCELL_CAP := 31
 ## Smallest grain diameter is 2·0.9·R = 9 mm: narrower gaps are seals, not pinches.
 const SEAL := 0.008
@@ -26,6 +26,11 @@ var prims: Array[Dictionary] = []
 var time := 0.0
 var world := Vector2(12.288, 6.912)
 var grid_overflow := 0
+## Per prim world AABB for this frame (min.xy, max.xy incl. motion), then flags, 0, 0, 0.
+var bounds := PackedFloat32Array()
+var _static_grid := PackedInt32Array()
+var _static_overflow := 0
+var _prim_bytes := PackedByteArray()
 
 
 func _init() -> void:
@@ -54,11 +59,23 @@ func piston_swept(body: int, axis: Vector2, stroke: float, period: float, a: flo
 	bodies[body].motion = {"kind": "swept", "axis": axis.normalized(), "stroke": stroke, "period": period, "a": a}
 
 
+## Telescopic stage: pose = anchor + (target pose + target_off - anchor) * f + off.
+func follow(body: int, target: int, anchor: Vector2, target_off: Vector2, f: float, off: Vector2) -> void:
+	bodies[body].motion = {"kind": "follow", "target": target, "anchor": anchor, "target_off": target_off, "f": f, "off": off}
+
+
 ## Ram with dwell: waits at home + axis*stroke for `dwell` of the period, sweeps
 ## to home in `sweep`, returns in the rest (cosine eased).
 func ram(body: int, axis: Vector2, stroke: float, period: float, dwell: float, sweep: float) -> void:
 	bodies[body].motion = {"kind": "ram", "axis": axis.normalized(), "stroke": stroke, "period": period,
 		"dwell": dwell, "sweep": sweep}
+
+
+## Slide gate: closed (home + axis * stroke) for `closed` s, opens in `move` s,
+## stays open for `open_s` s, closes in `move` s; then repeats (cosine eased).
+func gate(body: int, axis: Vector2, stroke: float, closed: float, move: float, open_s: float) -> void:
+	bodies[body].motion = {"kind": "gate", "axis": axis.normalized(), "stroke": stroke, "closed": closed,
+		"move": move, "open": open_s}
 
 
 ## Pendulum flap between ±amp (rad) with plateaus (sharpness k), period in s.
@@ -153,6 +170,8 @@ func add_prim(body: int, type: int, shape: Array, offset := Vector2.ZERO, angle 
 	var s := [0.0, 0.0, 0.0, 0.0]
 	for k in shape.size():
 		s[k] = shape[k]
+	_static_grid.clear()
+	_prim_bytes.clear()
 	prims.append({"type": type, "body": body, "repeat": repeat, "flags": flags, "offset": offset,
 		"angle": angle, "phase": offset.angle() if repeat > 1 else 0.0, "shape": s,
 		"mu_s": MU.x, "mu_k": MU.y, "bound": offset.length() + ext, "ext": ext, "speed": speed,
@@ -220,6 +239,17 @@ func pose(b: Dictionary, t: float) -> Array:
 			elif ph >= m.dwell + m.sweep:
 				x = 0.5 - 0.5 * cos(PI * (ph - m.dwell - m.sweep) / (1.0 - m.dwell - m.sweep))
 			return [b.home + m.axis * m.stroke * x, b.home_angle]
+		"gate":
+			var period: float = m.closed + 2.0 * m.move + m.open
+			var u := fposmod(t, period)
+			var x := 1.0
+			if u >= m.closed and u < m.closed + m.move:
+				x = 0.5 + 0.5 * cos(PI * (u - m.closed) / m.move)
+			elif u >= m.closed + m.move and u < m.closed + m.move + m.open:
+				x = 0.0
+			elif u >= m.closed + m.move + m.open:
+				x = 0.5 - 0.5 * cos(PI * (u - m.closed - m.move - m.open) / m.move)
+			return [b.home + m.axis * m.stroke * x, b.home_angle]
 		"flap":
 			var k: float = m.k
 			return [b.home, b.home_angle + m.amp * tanh(k * sin(TAU * t / m.period)) / tanh(k)]
@@ -238,6 +268,9 @@ func pose(b: Dictionary, t: float) -> Array:
 		"loop":
 			var lp := loop_pose(m.p0, m.p1, m.rr, m.s0 + m.speed * t)
 			return [lp[0], b.home_angle + lp[1]]
+		"follow":
+			var tp: Vector2 = pose(bodies[m.target], t)[0] + m.target_off
+			return [m.anchor + (tp - m.anchor) * m.f + m.off, b.home_angle]
 	return [b.pos, b.angle]
 
 
@@ -291,43 +324,85 @@ func grid_dims() -> Vector2i:
 
 
 ## Coarse grid: per cell [count, prim ids...] (PCELL_CAP + 1 ints). A prim is
-## listed in every cell its bounding circle can touch during this frame.
+## listed in every cell its bounding circle can touch during this frame. Static
+## prims are binned once and cached; only moving prims are added per frame.
 func pack_grid(dt: float) -> PackedInt32Array:
 	var gd := grid_dims()
-	var out := PackedInt32Array()
-	out.resize(gd.x * gd.y * (PCELL_CAP + 1))
-	grid_overflow = 0
-	var margin := 2.0 * SimConst.R_MAX + 0.02
+	if _static_grid.is_empty() or _static_grid.size() != gd.x * gd.y * (PCELL_CAP + 1):
+		_static_grid.resize(gd.x * gd.y * (PCELL_CAP + 1))
+		_static_grid.fill(0)
+		bounds.resize(prims.size() * 8)
+		_static_overflow = 0
+		for k in prims.size():
+			if prims[k].body == 0:
+				_static_overflow += _bin_prim(_static_grid, k, dt, gd)
+	var out := _static_grid.duplicate()
+	grid_overflow = _static_overflow
 	for k in prims.size():
-		var p: Dictionary = prims[k]
-		var b: Dictionary = bodies[p.body]
-		var c: Vector2
-		var rad: float
-		if p.repeat > 1:
-			c = b.pos
-			rad = p.bound
-		else:
-			c = b.pos + p.offset.rotated(b.angle)
-			rad = p.ext
-		rad += margin + b.vel.length() * dt + absf(b.omega) * dt * p.bound
-		var lo := Vector2i(floori((c.x - rad) / PCELL), floori((c.y - rad) / PCELL)).clamp(Vector2i.ZERO, gd - Vector2i.ONE)
-		var hi := Vector2i(floori((c.x + rad) / PCELL), floori((c.y + rad) / PCELL)).clamp(Vector2i.ZERO, gd - Vector2i.ONE)
-		for y in range(lo.y, hi.y + 1):
-			for x in range(lo.x, hi.x + 1):
-				var q := Vector2(clampf(c.x, x * PCELL, (x + 1) * PCELL), clampf(c.y, y * PCELL, (y + 1) * PCELL))
-				if q.distance_squared_to(c) > rad * rad:
-					continue
-				var at := (y * gd.x + x) * (PCELL_CAP + 1)
-				if out[at] < PCELL_CAP:
-					out[at] += 1
-					out[at + out[at]] = k
-				else:
-					grid_overflow += 1
+		if prims[k].body != 0:
+			grid_overflow += _bin_prim(out, k, dt, gd)
 	return out
 
 
+## World AABB of prim k at the bodies' current poses (analytic, exact for one
+## pose; polar-repeated prims use their bounding circle).
+func prim_aabb(k: int) -> Rect2:
+	var p: Dictionary = prims[k]
+	var b: Dictionary = bodies[p.body]
+	var sh: Array = p.shape
+	if p.repeat > 1:
+		return Rect2(b.pos - Vector2.ONE * p.bound, Vector2.ONE * 2.0 * p.bound)
+	var ang: float = b.angle + p.angle
+	var c: Vector2 = b.pos + p.offset.rotated(b.angle)
+	var cs := absf(cos(ang))
+	var sn := absf(sin(ang))
+	var e := Vector2.ZERO
+	match p.type:
+		CIRCLE:
+			e = Vector2(sh[0], sh[0])
+		CAPSULE:
+			e = Vector2(cs * sh[0] + sh[1], sn * sh[0] + sh[1])
+		BOX:
+			e = Vector2(cs * sh[0] + sn * sh[1], sn * sh[0] + cs * sh[1])
+		ARC:
+			e = Vector2.ONE * (sh[0] + sh[1])
+			c = b.pos + p.offset.rotated(b.angle)
+	return Rect2(c - e, 2.0 * e)
+
+
+## Adds prim k to the grid cells its AABB (grown by this frame's motion and the
+## largest grain) reaches; writes its bounds. Returns the number of full cells.
+func _bin_prim(out: PackedInt32Array, k: int, dt: float, gd: Vector2i) -> int:
+	var p: Dictionary = prims[k]
+	var b: Dictionary = bodies[p.body]
+	var box := prim_aabb(k)
+	var grow: float = b.vel.length() * dt + absf(b.omega) * dt * p.bound
+	box = box.grow(grow)
+	bounds[8 * k] = box.position.x
+	bounds[8 * k + 1] = box.position.y
+	bounds[8 * k + 2] = box.end.x
+	bounds[8 * k + 3] = box.end.y
+	bounds[8 * k + 4] = p.flags
+	var bb := box.grow(2.0 * SimConst.R_MAX + 0.01)
+	var lo := Vector2i(floori(bb.position.x / PCELL), floori(bb.position.y / PCELL)).clamp(Vector2i.ZERO, gd - Vector2i.ONE)
+	var hi := Vector2i(floori(bb.end.x / PCELL), floori(bb.end.y / PCELL)).clamp(Vector2i.ZERO, gd - Vector2i.ONE)
+	var full := 0
+	for y in range(lo.y, hi.y + 1):
+		for x in range(lo.x, hi.x + 1):
+			var at := (y * gd.x + x) * (PCELL_CAP + 1)
+			if out[at] < PCELL_CAP:
+				out[at] += 1
+				out[at + out[at]] = k
+			else:
+				full += 1
+	return full
+
+
 func upload(solver: GpuSolver) -> void:
-	solver.set_colliders(pack_bodies(), pack_prims(), pack_grid(SimConst.DT), grid_dims())
+	var g := pack_grid(SimConst.DT)
+	if _prim_bytes.size() != prims.size() * 64:
+		_prim_bytes = pack_prims()
+	solver.set_colliders(pack_bodies(), _prim_bytes, g, grid_dims(), bounds)
 
 
 ## CPU mirror of colliders.glsli prim_sdf (spawn placement, tests).
@@ -336,31 +411,83 @@ func sdf(p: Vector2, static_only := false) -> float:
 	for pr in prims:
 		if pr.flags & (FLAG_SINK | FLAG_VISUAL | FLAG_HEAT) or (static_only and pr.body != 0):
 			continue
-		var q: Vector2 = body_xform(pr.body).affine_inverse() * p
-		if pr.repeat > 1:
-			var sector: float = TAU / pr.repeat
-			var k := roundf((atan2(q.y, q.x) - pr.phase) / sector)
-			q = q.rotated(-k * sector)
-		q = (q - pr.offset).rotated(-pr.angle)
-		var sh: Array = pr.shape
-		var d := 0.0
-		match pr.type:
-			CIRCLE:
-				d = q.length() - sh[0]
-			CAPSULE:
-				q.x -= clampf(q.x, -sh[0], sh[0])
-				d = q.length() - sh[1]
-			BOX:
-				var e := q.abs() - Vector2(sh[0], sh[1]) + Vector2(sh[2], sh[2])
-				d = e.max(Vector2.ZERO).length() + minf(maxf(e.x, e.y), 0.0) - sh[2]
-			ARC:
-				var sc := Vector2(sin(sh[2]), cos(sh[2]))
-				q.x = absf(q.x)
-				d = ((q - sc * sh[0]).length() if sc.y * q.x > sc.x * q.y else absf(q.length() - sh[0])) - sh[1]
-		if pr.flags & FLAG_INVERTED:
-			d = -d
-		best = minf(best, d)
+		best = minf(best, prim_distance(pr, p))
 	return best
+
+
+## Signed distance from world point p to one prim at the bodies' current poses.
+func prim_distance(pr: Dictionary, p: Vector2) -> float:
+	var q: Vector2 = body_xform(pr.body).affine_inverse() * p
+	if pr.repeat > 1:
+		var sector: float = TAU / pr.repeat
+		var k := roundf((atan2(q.y, q.x) - pr.phase) / sector)
+		q = q.rotated(-k * sector)
+	q = (q - pr.offset).rotated(-pr.angle)
+	var sh: Array = pr.shape
+	var d := 0.0
+	match pr.type:
+		CIRCLE:
+			d = q.length() - sh[0]
+		CAPSULE:
+			q.x -= clampf(q.x, -sh[0], sh[0])
+			d = q.length() - sh[1]
+		BOX:
+			var e := q.abs() - Vector2(sh[0], sh[1]) + Vector2(sh[2], sh[2])
+			d = e.max(Vector2.ZERO).length() + minf(maxf(e.x, e.y), 0.0) - sh[2]
+		ARC:
+			var sc := Vector2(sin(sh[2]), cos(sh[2]))
+			q.x = absf(q.x)
+			d = ((q - sc * sh[0]).length() if sc.y * q.x > sc.x * q.y else absf(q.length() - sh[0])) - sh[1]
+	return -d if pr.flags & FLAG_INVERTED else d
+
+
+## Moving parts must never touch other parts (static or moving): samples every
+## moving prim's outline over `duration` and reports the deepest contact
+## (distance < 2 mm) per pair of body names. Designed exceptions: cleats on their
+## belt, telescopic stages in their barrel and in each other, a ram head on its stages.
+func touching(duration: float, steps: int) -> Dictionary:
+	var worst := {}
+	var allowed := [["cleat", ""], ["stage", "stage"], ["stage", "pusher"], ["stage", ""]]
+	for step in steps:
+		update(duration * step / steps)
+		var boxes: Array[Rect2] = []
+		for k in prims.size():
+			boxes.append(prim_aabb(k).grow(0.003))
+		for ki in prims.size():
+			var pr: Dictionary = prims[ki]
+			if pr.body == 0 or pr.flags & (FLAG_SINK | FLAG_VISUAL | FLAG_HEAT):
+				continue
+			# Candidates: prims of other bodies whose box meets this prim's box.
+			var cand: Array[Dictionary] = []
+			for ko in prims.size():
+				var o: Dictionary = prims[ko]
+				if o.body != pr.body and not (o.flags & (FLAG_SINK | FLAG_VISUAL | FLAG_HEAT)) and boxes[ko].intersects(boxes[ki]):
+					cand.append(o)
+			if cand.is_empty():
+				continue
+			var xf := body_xform(pr.body)
+			var na: String = bodies[pr.body].name
+			for k in pr.repeat:
+				var rep := Transform2D(TAU * k / pr.repeat, Vector2.ZERO)
+				for q in outline(pr, 16):
+					var p: Vector2 = xf * (rep * q)
+					if q.y < -pr.shape[1] + 0.035 and pr.type == BOX and na == "pusher":
+						continue  # ram sole: wiper seal on the floor plate by design
+					if q.y > pr.shape[1] - 0.01 and pr.type == BOX and na == "gate":
+						continue  # slide gate top: wiper seal under the bin dividers
+					for other in cand:
+						var nb: String = bodies[other.body].name if other.body != 0 else ""
+						if [na, nb] in allowed or [nb, na] in allowed:
+							continue
+						if na == "cleat" and other.style == "belt":
+							continue
+						var d := prim_distance(other, p)
+						if d < 0.002:
+							var key := "%s/%s" % [na, nb if nb != "" else other.style]
+							if not worst.has(key) or d < worst[key].d:
+								worst[key] = {"d": snappedf(d, 0.0001), "at": p, "t": snappedf(duration * step / steps, 0.01)}
+	update(0.0)
+	return worst
 
 
 ## Clearance audit: samples every moving collider over `duration` seconds and
@@ -375,14 +502,20 @@ func clearance(duration: float, steps: int) -> Dictionary:
 	for step in steps:
 		update(duration * step / steps)
 		for pr in prims:
-			# Cleats ride on their belt by design; everything else must keep clear.
-			if pr.body == 0 or pr.flags & (FLAG_SINK | FLAG_VISUAL | FLAG_HEAT) or bodies[pr.body].name == "cleat":
+			# Cleats ride on their belt and ram stages slide in their barrel by design
+			# (the ram head, taller than every stage, sweeps the same path and is
+			# checked); everything else must keep clear.
+			if pr.body == 0 or pr.flags & (FLAG_SINK | FLAG_VISUAL | FLAG_HEAT) or bodies[pr.body].name in ["cleat", "stage"]:
 				continue
 			var xf := body_xform(pr.body)
 			for k in pr.repeat:
 				var rep := Transform2D(TAU * k / pr.repeat, Vector2.ZERO)
 				for q in outline(pr, 16):
 					var p: Vector2 = xf * (rep * q)
+					if q.y < -pr.shape[1] + 0.035 and pr.type == BOX and bodies[pr.body].name == "pusher":
+						continue  # ram head's sole: a seal on the floor that opens over the floor's end
+					if q.y > pr.shape[1] - 0.01 and pr.type == BOX and bodies[pr.body].name == "gate":
+						continue  # slide gate top: wiper seal under the bin dividers
 					var d := sdf(p, true)
 					if d >= SEAL and d < worst:
 						worst = d

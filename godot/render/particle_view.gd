@@ -5,7 +5,17 @@ extends MultiMeshInstance2D
 ## offset dark discs drawn under the grains.
 
 
+var _solver: GpuSolver
+
+
+## Only the used slot range is drawn (the instance buffer stays at capacity).
+func _process(_d: float) -> void:
+	if _solver and multimesh:
+		multimesh.visible_instance_count = mini(_solver.active_n, _solver.capacity)
+
+
 func bind(solver: GpuSolver, px_per_m: float, shadow := false) -> void:
+	_solver = solver
 	var quad := QuadMesh.new()
 	quad.size = Vector2(2.0, 2.0)
 	var mm := MultiMesh.new()

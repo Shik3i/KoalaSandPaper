@@ -30,13 +30,15 @@ func result() -> Dictionary:
 func make_solver(cap: int, world: Vector2, sub := SimConst.SUBSTEPS) -> GpuSolver:
 	var s := GpuSolver.new()
 	s.substeps = int(args.get("sub", sub))
-	s.stack_k = float(args.get("stack", s.stack_k))
-	s.sleep = float(args.get("sleep", s.sleep))
-	s.omega = float(args.get("omega", s.omega))
-	s.iterations = int(args.get("it", s.iterations))
+	s.tc_steps = float(args.get("tc", s.tc_steps))
 	s.damping = float(args.get("damp", s.damping))
-	s.stabilize = args.get("stab", "1") == "1"
-	s.setup(cap, world)
+	s.crush_g = float(args.get("crush", s.crush_g))
+	var mats: Array = SimConst.MATERIALS.duplicate(true)
+	for m in mats:
+		m.mu_s = float(args.get("mu", m.mu_s))
+		m.mu_k = float(args.get("muk", args.get("mu", m.mu_k)))
+		m.restitution = float(args.get("e", m.restitution))
+	s.setup(cap, world, mats)
 	solver = s
 	return s
 

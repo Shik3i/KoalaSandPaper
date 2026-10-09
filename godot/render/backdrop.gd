@@ -20,9 +20,10 @@ func _draw() -> void:
 	# Elevator casing: a band along the incline behind the chain.
 	var u := (f.elev_top - f.elev_bottom).normalized()
 	var n := Vector2(u.y, -u.x)
-	var w := 0.72
-	var a := f.elev_bottom - u * 0.3
-	var b := f.elev_top + u * 0.15
+	# Behind the casing walls (pit radius 0.58 m from the chain centre line).
+	var w := 0.62
+	var a := f.elev_bottom - u * 0.62
+	var b := f.elev_top + u * 0.62
 	_poly([a - n * w, a + n * w, b + n * w, b - n * w], PANEL)
 	for k in 9:
 		var p0 := a.lerp(b, k / 9.0)
@@ -33,7 +34,10 @@ func _draw() -> void:
 	_line(a + n * w, b + n * w, FRAME, 0.03)
 	# Shredder column and mixer backing.
 	_panel(Rect2(7.5, 2.95, 1.8, 2.95))
-	draw_circle(to_px(f.bowl_c), (f.bowl_r + 0.18) * px_per_m, PANEL)
+	if f.map == "galton":
+		_panel(Rect2(f.bins.position.x - 0.15, f.bins.position.y - 0.12, f.bins.size.x + 0.3, 3.35 - f.bins.position.y))
+	else:
+		draw_circle(to_px(f.bowl_c), (f.bowl_r + 0.18) * px_per_m, PANEL)
 	# Belt A frame hung from the roof girder.
 	_line(Vector2(0.0, 6.86), Vector2(12.288, 6.86), FRAME, 0.06)
 	for x in [4.3, 5.2, 6.8, 7.6]:

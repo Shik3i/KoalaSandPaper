@@ -8,8 +8,7 @@ var used := PackedByteArray()
 var alloc_frame := PackedInt32Array()
 var frame := 0
 var _pending := -1
-var _cursor := 0
-## One past the highest slot ever allocated (dispatch range for the solver).
+## One past the highest used slot (dispatch range for the solver).
 var high_water := 0
 
 
@@ -19,24 +18,38 @@ func _init(capacity: int) -> void:
 	alloc_frame.fill(-1)
 
 
-## First contiguous run of n free slots, or -1.
+## Lowest contiguous run of n free slots, or -1. First fit keeps the used range
+## compact, so the solver's dispatch range (high_water) stays near the live count.
 func alloc(n: int) -> int:
 	var cap := used.size()
-	for pass_i in 2:
-		var run := 0
-		var start := _cursor if pass_i == 0 else 0
-		var stop := cap if pass_i == 0 else _cursor + n
-		for i in range(start, mini(stop, cap)):
-			run = run + 1 if used[i] == 0 else 0
-			if run == n:
-				var first := i - n + 1
-				for k in range(first, i + 1):
-					used[k] = 1
-					alloc_frame[k] = frame
-				_cursor = (i + 1) % cap
-				high_water = maxi(high_water, i + 1)
-				return first
+	var i := used.find(0)
+	while i >= 0 and i + n <= cap:
+		var nxt := used.find(1, i)
+		var end := cap if nxt < 0 else nxt
+		if end - i >= n:
+			for k in range(i, i + n):
+				used[k] = 1
+				alloc_frame[k] = frame
+			high_water = maxi(high_water, i + n)
+			return i
+		i = used.find(0, end)
 	return -1
+
+
+## The n lowest free slots (not necessarily contiguous), or empty if too few.
+func alloc_any(n: int) -> PackedInt32Array:
+	var out := PackedInt32Array()
+	var i := used.find(0)
+	while i >= 0 and out.size() < n:
+		out.append(i)
+		i = used.find(0, i + 1)
+	if out.size() < n:
+		return PackedInt32Array()
+	for k in out:
+		used[k] = 1
+		alloc_frame[k] = frame
+	high_water = maxi(high_water, out[n - 1] + 1)
+	return out
 
 
 func free_count() -> int:
@@ -56,4 +69,5 @@ func _on_info(data: PackedByteArray, at: int) -> void:
 	for i in mini(info.size(), used.size()):
 		if (info[i] >> 8) & 0xff == 0 and alloc_frame[i] < at:
 			used[i] = 0
+	high_water = used.rfind(1) + 1
 	_pending = -1

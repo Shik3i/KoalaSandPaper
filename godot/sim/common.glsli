@@ -1,26 +1,40 @@
-// Shared layout for all solver kernels. SI units (m, s, kg); y points up.
-// The neighbour grid is double-buffered by substep parity: CELL_COUNT and CELL_OF
-// hold two halves; the velocity pass clears the other parity's cells, which no
-// kernel reads during this substep (no clear/read race).
+// Shared layout for the DEM kernels. SI units (m, s, kg); y points up.
+//
+// Discrete element method (Cundall & Strack 1979): grains are stiff discs with
+// linear spring-dashpot normal contacts and history-dependent tangential springs
+// capped by Coulomb friction (Luding 2008). Contact forces scale with the load
+// they carry, so friction inside a heap grows with depth like in real sand, and
+// grains have real mass and inertia. Per step (dt = frame / substeps):
+//   dem_step   free grains: forces, integration, zones, grid insert, render;
+//              rigid grains: contact force only
+//   dem_rigid  rigid pieces: sum forces/torques, integrate, crush; insert their grains
+//
+// Neighbour grid: fixed bins holding packed grain data (position, half-float
+// velocity, id/radius/kind/material), so the force loop reads neighbours
+// contiguously instead of gathering. Two halves alternate by step; a bin count
+// carries the step stamp in its upper 24 bits, so stale bins read as empty and no
+// clearing pass is needed (inserts raise the stamp with atomicMax first).
 
 #define WG 256
-#define CELL_CAP 4u
+#define CELL_CAP 6u
+#define ID_MASK 0x1ffffu
 #define TEX_W 1024u
 #define MAX_BONDS 6u
+// Contact history slots per particle (tangential springs).
+#define HIST_K 8u
 
 #define KIND_NONE 0u
 #define KIND_GRAIN 1u
 #define KIND_BONDED 2u
 #define KIND_SPARK 3u
-// Grain of an intact rigid piece: position follows its body (rigid_solve.glsl).
+// Grain of an intact rigid piece: moves with its body (dem_rigid.glsl).
 #define KIND_RIGID 4u
-#define BODIES_PER_PIECE 4u
 
 #define FLAG_LAST 1u
-// bit 1: no pre-stabilisation; bit 2: grid parity; bits 8-15: global substep counter mod 240.
-#define FLAG_NOSTAB 2u
-#define FLAG_PARITY 4u
+// bits 8-15: global step counter mod 240.
 #define CELL_NONE 0xffffffffu
+// History keys: particle j → j + 1; surface prim p → KEY_PRIM | p.
+#define KEY_PRIM 0x40000000u
 
 #define ST_CLAMP 0
 #define ST_OVERFLOW 1
@@ -33,34 +47,35 @@
 // 8..11 per-sink counters; 12/13 last clamp position, 14/15 last overflow position (debug).
 #define ST_CLAMP_POS 12
 #define ST_OVF_POS 14
+// 16/17 position of the last crushed rigid body (debug).
+#define ST_CRUSH_POS 16
+// 18: machine prim touched by the last speed-clamped grain (0xffff: none) (debug).
+#define ST_CLAMP_PRIM 18
+// 20/21: last position outside the world, before clamping (debug).
+#define ST_OOB_POS 20
 
 #define PRIM_CIRCLE 0u
 #define PRIM_CAPSULE 1u
 #define PRIM_BOX 2u
 #define PRIM_ARC 3u
 
-// Positions at the substep start (pre-stabilisation already applied by integrate);
-// after finalize: positions at the substep end.
-layout(set = 0, binding = 0, std430) restrict buffer XBuf { vec2 X[]; };
-// Substep displacement (predicted position = X + D). Kept separate from X so
-// velocity D/h does not lose precision to float32 rounding of positions.
-layout(set = 0, binding = 1, std430) restrict buffer DInBuf { vec2 D_IN[]; };
-layout(set = 0, binding = 2, std430) restrict buffer DOutBuf { vec2 D_OUT[]; };
-layout(set = 0, binding = 3, std430) restrict buffer VBuf { vec2 V[]; };
+// Contact force of rigid grains (dem_step → dem_rigid).
+layout(set = 0, binding = 2, std430) restrict buffer VNBuf { vec2 VN[]; };
 // bits 0-7 material, 8-15 kind, 16-23 radius code, 24-31 heat (glow; burns in heat zones).
 layout(set = 0, binding = 4, std430) restrict buffer InfoBuf { uint INFO[]; };
 // Packed 0xRRGGBB (24 bit, exact as float in the render texture).
 layout(set = 0, binding = 5, std430) restrict buffer ColorBuf { uint COLOR[]; };
-layout(set = 0, binding = 6, std430) restrict buffer CellCountBuf { uint CELL_COUNT[]; };
-layout(set = 0, binding = 7, std430) restrict buffer CellItemsBuf { uint CELL_ITEMS[]; };
-layout(set = 0, binding = 8, std430) restrict buffer CellOfBuf { uint CELL_OF[]; };
+// Grid (two halves): count word = stamp << 8 | n; bins of CELL_CAP entries
+// (x bits, y bits, packHalf2x16(v), id | radius code << 17 | kind << 25 | material << 28).
+layout(set = 0, binding = 6, std430) restrict buffer BinCountBuf { uint BIN_COUNT[]; };
+layout(set = 0, binding = 7, std430) restrict buffer BinBuf { uvec4 BINS[]; };
 layout(set = 0, binding = 9, std430) restrict buffer StatsBuf { uint STATS[]; };
-// Per material two vec4: [2m] = (mu_s, mu_k, restitution, inv_mass_ref),
-// [2m+1] = (bond_compliance, break_strain, density, 0). Mass scales with r^3.
+// Per material two vec4: [2m] = (mu_s, mu_k, zeta (damping ratio), inv_mass_ref),
+// [2m+1] = (unused, break_strain, density, 0). Mass scales with r^3.
 layout(set = 0, binding = 10, std430) restrict readonly buffer MatBuf { vec4 MAT[]; };
 layout(set = 0, binding = 11, rgba32f) uniform restrict writeonly image2D RENDER_IMG;
-// Packed (X, D) written by integrate: one coalesced read per neighbour in contacts.
-layout(set = 0, binding = 12, std430) restrict buffer XDBuf { vec4 XD[]; };
+// Packed (position, velocity) at the step start: one coalesced read per neighbour.
+layout(set = 0, binding = 12, std430) restrict buffer XVBuf { vec4 XV[]; };
 layout(set = 0, binding = 13, std430) restrict readonly buffer BodyBuf { vec4 BODY[]; };
 struct Prim {
 	uvec4 head;   // type, body, polar repeat count, flags (1 = inverted)
@@ -71,63 +86,99 @@ struct Prim {
 layout(set = 0, binding = 14, std430) restrict readonly buffer PrimBuf { Prim PRIMS[]; };
 // Per particle MAX_BONDS slots: x = partner + 1 (0 = empty), bit 31 = broken; y = rest length bits.
 layout(set = 0, binding = 15, std430) restrict buffer BondBuf { uvec2 BONDS[]; };
-// Pre-stabilisation shift (Macklin et al. 2014, §4.4): overlap present at the
-// substep start is removed by moving X itself (applied in integrate), never
-// turned into velocity. Computed by the velocity pass on the end positions.
-layout(set = 0, binding = 16, std430) restrict buffer StabBuf { vec2 STAB[]; };
-// Velocity pass (XPBD, Müller et al. 2020 §3.6): XV = (end position, velocity
-// from the position solve), VOLD = velocity at the substep start.
-layout(set = 0, binding = 17, std430) restrict buffer XVBuf { vec4 XV[]; };
-layout(set = 0, binding = 18, std430) restrict buffer VOldBuf { vec2 VOLD[]; };
-// Rigid pieces. REST: grain position in the piece's rest frame. BODY_OF: body
-// index (piece * 4 + sub) or CELL_NONE; kept after shattering as fragment id.
+// Per visit slot (thread t of this frame's ORDER, not per particle: consecutive
+// threads then touch consecutive memory) HIST_K tangential springs, compact
+// (first empty key ends the list); dem_order carries them over between frames.
+// Keys and spring vectors are separate arrays so the key scan reads one cache
+// line: key = partner id + 1 or KEY_PRIM | prim (0 = empty), bit 31 = sliding;
+// spring vector in float32 (per-step increments are ~1e-7 R).
+// Double-buffered by step: read *_IN, write *_OUT (no per-thread arrays).
+layout(set = 0, binding = 16, std430) restrict readonly buffer HKeyInBuf { uint HKEY_IN[]; };
+layout(set = 0, binding = 17, std430) restrict writeonly buffer HKeyOutBuf { uint HKEY_OUT[]; };
+layout(set = 0, binding = 18, std430) restrict readonly buffer HXiInBuf { vec2 HXI_IN[]; };
+layout(set = 0, binding = 3, std430) restrict writeonly buffer HXiOutBuf { vec2 HXI_OUT[]; };
+// Rigid pieces (up to NSUB bodies per piece: whole piece, then chunks). REST: grain
+// position in the piece's rest frame. BODY_OF: body index or CELL_NONE.
 layout(set = 0, binding = 19, std430) restrict buffer RestBuf { vec2 REST[]; };
 layout(set = 0, binding = 20, std430) restrict buffer BodyOfBuf { uint BODY_OF[]; };
 // Per body 4 vec4: [0] c.xy, angle, alive | [1] v.xy, omega, mass
-// [2] predicted c.xy, angle, inertia | [3] rest COM c0.xy, crush counter, 0
+// [2] generation (0 piece, 1 chunk), leader grain, 0, inertia | [3] rest COM c0.xy, crush counter, grains.
+// Two halves: step s writes its start state to half s & 1 (see body_now).
 layout(set = 0, binding = 21, std430) restrict buffer RBodyBuf { vec4 RB[]; };
-// Per piece: start slot, count, sub-bodies used, 0.
+// Per piece: PLIST offset, grain count, bodies used, 0.
 layout(set = 0, binding = 22, std430) restrict buffer PieceBuf { uvec4 PIECES[]; };
-// Rigid grains: surface friction demand (tangential slip t.xy, mu_s*pen, mu_k*pen),
-// resolved per body in rigid_solve (Coulomb at piece level, translation only).
-layout(set = 0, binding = 23, std430) restrict buffer FricBuf { vec4 FRIC[]; };
+// Rigid-body force accumulators, three slots by step: per body force.xy, torque,
+// then the 8 directional half-sums of the crush measure (atomicAdd by grains).
+layout(set = 0, binding = 29, std430) restrict buffer AccBuf { float ACC[]; };
+// Piece grain lists (slot indices, MAX_PIECE_GRAINS per piece) and spawn staging:
+// per grain (x.xy, v.xy), (rest.xy, info bits, colour bits).
+layout(set = 0, binding = 30, std430) restrict buffer PListBuf { uint PLIST[]; };
+layout(set = 0, binding = 31, std430) restrict readonly buffer StageBuf { vec4 STAGE[]; };
+#define MAX_PIECE_GRAINS 1024u
 // Coarse collider grid (built on the CPU per frame): per cell [count, prim ids...].
 layout(set = 0, binding = 24, std430) restrict readonly buffer PGridBuf { uint PGRID[]; };
 #define PCELL_STRIDE 32u
+// Spatial processing order (dem_order.glsl): ORDER[t] = grain visited by thread t;
+// RANK[i] = t of grain i in the current order (CELL_NONE: none, e.g. just spawned);
+// BLOCK_CURSOR[n_blocks] = number of live grains after the scan.
+layout(set = 0, binding = 26, std430) restrict buffer OrderBuf { uint ORDER[]; };
+layout(set = 0, binding = 32, std430) restrict buffer RankBuf { uint RANK[]; };
+layout(set = 0, binding = 27, std430) restrict buffer BlockCountBuf { uint BLOCK_COUNT[]; };
+layout(set = 0, binding = 28, std430) restrict buffer BlockCursorBuf { uint BLOCK_CURSOR[]; };
+// Per prim, two vec4: world AABB for this frame (min.xy, max.xy, incl. motion), (flags, 0, 0, 0).
+layout(set = 0, binding = 25, std430) restrict readonly buffer PBoundBuf { vec4 PBOUND[]; };
+
+// Whether a disc (p, rad) can touch prim pid's AABB this frame.
+bool in_bound(uint pid, vec2 p, float rad) {
+	vec4 b = PBOUND[2u * pid];
+	return p.x > b.x - rad && p.y > b.y - rad && p.x < b.z + rad && p.y < b.w + rad;
+}
+uint prim_flags(uint pid) { return uint(PBOUND[2u * pid + 1u].x); }
 
 layout(push_constant, std430) uniform Params {
 	vec2 world;
 	vec2 gravity;
-	float h;
+	float dt;
 	float r;        // reference radius (mean)
 	float inv_cell; // 1 / (2 r_max)
-	float max_step; // 0.5 r
+	float v_max;    // speed cap (m/s): per-step motion at most 0.75 r
 	uint n;
 	uint grid_w;
 	uint grid_h;
 	uint flags;
-	float damp;     // velocity factor per substep
-	float stack_k;  // shock-propagation strength (0 = off)
-	float omega;    // Jacobi relaxation
-	float t_sub;    // time of this substep's end, relative to frame start
+	float kn;       // normal stiffness (N/m)
+	float kt;       // tangential stiffness (N/m)
+	float bond_k;   // bond stiffness (N/m)
+	float damp;     // velocity factor per step (air drag, normally 1)
+	float t_sub;    // time of this step's start, relative to frame start
 	uint cap;       // buffer capacity (stride of the parity-split CELL_OF)
-	float sleep;    // displacement below which a particle keeps its position (m/substep)
 	float r_max;
 	float inv_pcell; // 1 / coarse collider cell size
 	uint n_pieces;
-	float crush;    // rigid residual (m) above which a squeezed piece shatters
-	float kerf;     // laser kerf half width (m)
+	float crush_f;  // contact force (N) on a rigid grain above which its piece is being crushed
 	uint pgrid;     // coarse grid width | height << 16
-	vec2 laser_a;   // laser beam segment (a == b: off); cuts every bond crossing it
-	vec2 laser_b;
+	float rigid_damp_mass; // damping mass factor for rigid grains (× grain mass)
+	uint heat_every; // steps per heat increment in heat zones (cooling: 3x slower)
+	uint stamp;     // grid stamp of this step (24 bit); the previous step's grid has stamp - 1
+	uint aux;       // dem_spawn: piece index
+	float guard;    // referenced by every kernel so all declare the full block
 } pc;
+
+#define NSUB 8u
+#define MAX_RB 2048u
+#define ACC_STRIDE 12u
+// A squeezed body breaks within a few steps: a press or nip keeps closing at
+// ~0.5 m/s, and every step of delay is overlap that would be released explosively.
+#define CRUSH_STEPS 4.0
+#define CRUSH_WEIGHTS 3.0
 
 uint kind_of(uint info) { return (info >> 8u) & 0xffu; }
 uint heat_of(uint info) { return info >> 24u; }
 uint with_heat(uint info, uint heat) { return (info & 0x00ffffffu) | (min(heat, 255u) << 24u); }
-uint substep_counter() { return (pc.flags >> 8u) & 0xffu; }
+uint step_counter() { return (pc.flags >> 8u) & 0xffu; }
 // Radius code: r = R (1 + POLY (code / 127.5 - 1)), POLY = r_max / R - 1.
 float rad_of(uint info) { return pc.r * (1.0 + (pc.r_max / pc.r - 1.0) * (float((info >> 16u) & 0xffu) / 127.5 - 1.0)); }
+uint mat_of(uint info) { return info & 0xffu; }
 
 // Coarse collider cell of position p: index of its [count, ids...] block.
 uint pgrid_cell(vec2 p) {
@@ -136,22 +187,48 @@ uint pgrid_cell(vec2 p) {
 	ivec2 c = clamp(ivec2(floor(p * pc.inv_pcell)), ivec2(0), ivec2(gw, gh) - 1);
 	return (uint(c.y) * gw + uint(c.x)) * PCELL_STRIDE;
 }
-uint mat_of(uint info) { return info & 0xffu; }
 
-float inv_mass(uint info, float rad) {
-	float s = pc.r / rad;
-	return MAT[2u * mat_of(info)].w * s * s * s;
+float mass_of(uint info, float rad) {
+	float s = rad / pc.r;
+	return s * s * s / MAT[2u * mat_of(info)].w;
 }
 
-uint par() { return (pc.flags & FLAG_PARITY) != 0u ? 1u : 0u; }
 uint cells_total() { return pc.grid_w * pc.grid_h; }
-uint count_at(uint cell) { return min(CELL_COUNT[par() * cells_total() + cell], CELL_CAP); }
-uint cell_of(uint i) { return CELL_OF[par() * pc.cap + i]; }
+uint grid_read() { return (pc.stamp - 1u) & 1u; }
 
-// Inverse mass used for contact splitting: rigid grains carry their body's mass.
-float particle_w(uint i, uint info, float rad) {
-	if (kind_of(info) == KIND_RIGID) return 1.0 / RB[4u * BODY_OF[i] + 1u].w;
-	return inv_mass(info, rad);
+float rad_code(uint meta) { return pc.r * (1.0 + (pc.r_max / pc.r - 1.0) * (float((meta >> 17u) & 0xffu) / 127.5 - 1.0)); }
+
+float mass_ref(uint mat, float rad) {
+	float s = rad / pc.r;
+	return s * s * s / MAT[2u * mat].w;
+}
+
+// Grains in cell of grid half g written with stamp st (0 if stale).
+uint bin_count(uint g, uint cell, uint st) {
+	uint w = BIN_COUNT[g * cells_total() + cell];
+	return (w >> 8u) == st ? min(w & 0xffu, CELL_CAP) : 0u;
+}
+
+uvec2 cell_coord(vec2 p) {
+	ivec2 c = ivec2(floor(p * pc.inv_cell));
+	return uvec2(clamp(c, ivec2(0), ivec2(pc.grid_w, pc.grid_h) - 1));
+}
+
+// Publishes grain i (state at the end of this step) in this step's grid half.
+void bin_insert(uint i, uint info, vec2 p, vec2 v) {
+	uvec2 cc = cell_coord(p);
+	uint ci = (pc.stamp & 1u) * cells_total() + cc.y * pc.grid_w + cc.x;
+	uint tag = pc.stamp << 8u;
+	atomicMax(BIN_COUNT[ci], tag);
+	uint slot = atomicAdd(BIN_COUNT[ci], 1u) - tag;
+	if (slot < CELL_CAP) {
+		uint meta = i | (((info >> 16u) & 0xffu) << 17u) | ((kind_of(info) & 7u) << 25u) | ((mat_of(info) & 15u) << 28u);
+		BINS[ci * CELL_CAP + slot] = uvec4(floatBitsToUint(p), packHalf2x16(v), meta);
+	} else {
+		atomicAdd(STATS[ST_OVERFLOW], 1u);
+		STATS[ST_OVF_POS] = floatBitsToUint(p.x);
+		STATS[ST_OVF_POS + 1] = floatBitsToUint(p.y);
+	}
 }
 
 bool bonded_to(uint i, uint j) {
@@ -168,11 +245,6 @@ bool same_unit(uint i, uint j, uint ki, uint kj) {
 	return false;
 }
 
-uvec2 cell_coord(vec2 p) {
-	ivec2 c = ivec2(floor(p * pc.inv_cell));
-	return uvec2(clamp(c, ivec2(0), ivec2(pc.grid_w, pc.grid_h) - 1));
-}
-
 void atomic_max_f(int slot, float v) {
 	// Valid for v >= 0: IEEE bit patterns order like unsigned ints.
 	atomicMax(STATS[slot], floatBitsToUint(max(v, 0.0)));
@@ -183,61 +255,55 @@ mat2 rot(float a) {
 	return mat2(c, s, -s, c);
 }
 
-// Jacobi accumulator. Corrections are averaged with an effective count
-// N = sum|c| / max|c| (>= 1): constraints that propose nothing do not dilute
-// the others (plain averaging made friction creep), redundant ones still damp.
-struct Acc {
-	vec2 sum;
-	float mag;
-	float peak;
+// Render texel w: kind (3 bit) | radius code (8) | heat (8) | contacts (3, shading):
+// below 2^24, so exact in a float channel.
+uint render_w(uint kind, uint info, uint heat, uint contacts) {
+	return min(kind, 7u) | (((info >> 16u) & 0xffu) << 3u) | (min(heat, 255u) << 11u) | (min(contacts, 7u) << 19u);
+}
+
+uint rb_at(uint half_, uint b, uint k) { return half_ * MAX_RB * 4u + 4u * b + k; }
+uint acc_at(uint slot, uint b) { return (slot * MAX_RB + b) * ACC_STRIDE; }
+
+struct Body {
+	vec4 c;    // centre of mass xy, angle, alive
+	vec4 v;    // velocity xy, omega, mass
+	vec4 aux;  // generation, leader grain, 0, inertia
+	vec4 ex;   // rest COM xy, crush counter, grain count
 };
 
-void acc_add(inout Acc a, vec2 c) {
-	float m = length(c);
-	a.sum += c;
-	a.mag += m;
-	a.peak = max(a.peak, m);
+Body body_load(uint half_, uint b) {
+	return Body(RB[rb_at(half_, b, 0u)], RB[rb_at(half_, b, 1u)], RB[rb_at(half_, b, 2u)], RB[rb_at(half_, b, 3u)]);
 }
 
-vec2 acc_total(Acc a) {
-	return a.peak > 0.0 ? a.sum * (a.peak / a.mag) : vec2(0.0);
+void body_store(uint half_, uint b, Body B) {
+	RB[rb_at(half_, b, 0u)] = B.c;
+	RB[rb_at(half_, b, 1u)] = B.v;
+	RB[rb_at(half_, b, 2u)] = B.aux;
+	RB[rb_at(half_, b, 3u)] = B.ex;
 }
 
-// Coulomb friction for one contact (Macklin 2014, eq. 24): tangential part of
-// rel, cancelled fully inside the static cone, limited to mu_k * pen outside.
-vec2 friction(vec2 n, float pen, vec2 rel, float mu_s, float mu_k) {
-	vec2 t = rel - dot(rel, n) * n;
-	float tl = length(t);
-	if (tl <= 0.0) return vec2(0.0);
-	return (tl < mu_s * pen) ? -t : -t * min(mu_k * pen / tl, 1.0);
-}
-
-// Immovable/kinematic surfaces are a separate constraint group applied after
-// particles and bonds, projected sequentially (Gauss-Seidel): corners resolve
-// exactly and pile pressure can never push a grain inside.
-struct Surf {
-	vec2 p;     // current position
-	vec2 d;     // current displacement (friction acts on d - surface displacement)
-	bool rigid; // rigid grain: normal only, friction demand accumulated in fr
-	vec4 fr;
-};
-
-void surface_contact(vec2 n, float pen, vec2 surf_disp, float mu_s, float mu_k, inout Surf s) {
-	vec2 c = n * pen;
-	if (s.rigid) {
-		vec2 rel = s.d - surf_disp;
-		s.fr += vec4(rel - dot(rel, n) * n, mu_s * pen, mu_k * pen);
-	} else {
-		c += friction(n, pen, s.d - surf_disp, mu_s, mu_k);
-	}
-	s.p += c;
-	s.d += c;
-}
-
-void world_walls(float ri, vec4 mi, inout Surf su) {
-	vec2 hi = pc.world - ri;
-	if (su.p.y < ri) surface_contact(vec2(0.0, 1.0), ri - su.p.y, vec2(0.0), mi.x, mi.y, su);
-	if (su.p.y > hi.y) surface_contact(vec2(0.0, -1.0), su.p.y - hi.y, vec2(0.0), mi.x, mi.y, su);
-	if (su.p.x < ri) surface_contact(vec2(1.0, 0.0), ri - su.p.x, vec2(0.0), mi.x, mi.y, su);
-	if (su.p.x > hi.x) surface_contact(vec2(-1.0, 0.0), su.p.x - hi.x, vec2(0.0), mi.x, mi.y, su);
+// State of body b at the start of this step: last step's state integrated
+// (symplectic Euler) with the forces its grains accumulated last step, plus the
+// crush counter. Every grain of the body evaluates this identically (same inputs,
+// same operations); the body's leader grain stores it.
+Body body_now(uint b) {
+	uint prev = pc.stamp - 1u;
+	Body B = body_load(prev & 1u, b);
+	if (B.c.w < 0.5) return B;
+	uint a = acc_at(prev % 3u, b);
+	vec2 F = vec2(ACC[a], ACC[a + 1u]);
+	float T = ACC[a + 2u];
+	float M = B.v.w;
+	B.v.xy = (B.v.xy + (F / M + pc.gravity) * pc.dt) * pc.damp;
+	B.v.z = (B.v.z + T / B.aux.w * pc.dt) * pc.damp;
+	float sp = length(B.v.xy);
+	if (sp > pc.v_max) B.v.xy *= pc.v_max / sp;
+	B.c.xy += B.v.xy * pc.dt;
+	B.c.z += B.v.z * pc.dt;
+	// Crush: force pushing from both sides at once, max over 4 directions.
+	float squeeze = 0.0;
+	for (uint d = 0u; d < 4u; d++) squeeze = max(squeeze, min(ACC[a + 3u + 2u * d], ACC[a + 4u + 2u * d]));
+	float limit = max(pc.crush_f, CRUSH_WEIGHTS * M * length(pc.gravity));
+	B.ex.z = squeeze > limit ? B.ex.z + 1.0 : max(B.ex.z - 0.25, 0.0);
+	return B;
 }

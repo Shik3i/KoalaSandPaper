@@ -21,9 +21,8 @@ func _ready() -> void:
 	var world := Vector2(wc, wc * 9 / 16) * 2.0 * r
 	solver = GpuSolver.new()
 	solver.substeps = args.sub
-	solver.iterations = args.it
-	solver.stack_k = args.get("stack", SimConst.STACK_K)
 	solver.setup(args.n, world)
+	solver.no_barrier = args.get("nobar", 0) == 1
 	if args.has("skip"):
 		solver.skip_kernels = str(args.skip).split("+")
 	var cols := int(wc * 0.78)

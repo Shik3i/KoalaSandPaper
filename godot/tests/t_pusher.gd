@@ -14,7 +14,7 @@ func setup() -> void:
 	machine.world = Vector2(4.0, 1.2)
 	machine.add_segment(Vector2(0.2, 0.3), Vector2(3.8, 0.3), 0.025)
 	var half := Vector2(0.045, 0.13)
-	body = machine.add_body(Vector2(0.5, 0.3 + 0.025 + 0.003 + half.y), 0.0, "pusher")
+	body = machine.add_body(Vector2(0.5, 0.3 + 0.025 - 0.001 + half.y), 0.0, "pusher")
 	machine.piston_swept(body, Vector2(1.0, 0.0), 2.4, 8.0, 0.0)
 	machine.add_prim(body, Machine.BOX, [half.x, half.y, 0.003])
 	machine.update(0.0)
