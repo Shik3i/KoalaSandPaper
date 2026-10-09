@@ -17,7 +17,8 @@ Overwritten as decisions change; not a log. Read this first on resume.
 
 ## Solver (godot/sim) — DEM on the main RenderingDevice
 Why DEM: the earlier XPBD/Jacobi solver had friction capacity independent of depth (per-substep corrections, not load), so bulk sand flowed like a light fluid around blades, crept (0.3 R/s at rest) and turned overlap into velocity. DEM (Cundall & Strack 1979; Luding 2008) gives load-dependent friction, real inertia, no creep.
-- Contact: linear spring-dashpot normal (k from contact time t_c = 7 steps, no tension), tangential spring with memory, Coulomb on the elastic shear with static/kinetic hysteresis; dashpots implicit in the grain's own velocity (explicit ones went unstable with many stiff contacts: bonded lattices burst). Non-rotating discs.
+- Contact: linear spring-dashpot normal (k from contact time t_c = 7 steps, no tension), stiffening ×3 beyond 0.15 R overlap (a blade pushing a 0.5 m heap otherwise sank grains a whole radius into each other); tangential spring with memory, Coulomb on the elastic shear with static/kinetic hysteresis; dashpots implicit in the grain's own velocity (explicit ones went unstable with many stiff contacts: bonded lattices burst).
+- Grains rotate (inertia 2/5 m r²) and have rolling resistance μr·r_eff·f_n, implicit in the spin (an explicit one overshot: more μr gave flatter heaps). Without spin, contacts could only slide: pushed heaps moved as one glued block.
 - Per frame: `dem_order` ×4 (count/scan/scatter grains into 9 cm blocks → spatial visit order; carry contact histories to the new visit slots), then 48 × `dem_step` (fused: forces, integration, zones, grid insert, render), `dem_rigid` every 4 steps.
 - Grid: bins of packed grain data (pos, half-float vel, id|radius|kind|material), two halves stamped by step (count word = stamp<<8 | n; stale = empty; no clear pass).
 - Contact history (keys + float32 springs) lives in visit-slot order (coalesced); float32 because per-step increments (~1e-7 R) vanish in half floats.
@@ -27,14 +28,16 @@ Why DEM: the earlier XPBD/Jacobi solver had friction capacity independent of dep
 - Pieces may occupy any free slots (per-piece slot lists + `dem_spawn` scatter): contiguous allocation fragmented as sand burns and grew the slot range without bound.
 - Colliders: SDF prims with analytic gradients; per-prim world AABB culling; coarse CPU grid 0.2 m (static part cached).
 
-## Calibration (sand μ = 0.35, e = 0.1, R = 5 mm ±10 %, 48 steps)
-- Repose (T2) 31–34° (dry sand 32°). Column collapse a = 2: (L∞−L0)/L0 = 2.4 (Lube 2005: 1.2 a). Rest jitter 0.0 R/s.
-- Silo (T4): Beverloo fit within 1 %, k ≈ 2.5; orifices ≥ 8 d (6 d arches and jams, as in 2D experiments).
+## Calibration (sand μ = 0.6, μr = 0.65, e = 0.1, R = 5 mm ±10 %, 48 steps)
+- Rolling grains need more friction than sliding discs for the same heap (old non-rotating set: μ = 0.35). e = 0.4 looked livelier but grains squeezed under the press released their overlap at 5 m/s (T8 out-of-world); pieces e = 0.03.
+- Repose (T2) 31–35° (dry sand 32°); single heaps scatter ±4°, so T2 checks the mean of three. Column collapse a = 2: (L∞−L0)/L0 = 2.1–2.4 (Lube 2005: 1.2 a). Rest jitter 0.0 R/s.
+- Silo (T4): Beverloo fit within 2 %, but k ≈ 0 (2.5 before grains rotated; cause not investigated); orifices ≥ 8 d (6 d arches and jams, as in 2D experiments).
 - Pieces/steel μ = 0.625 (single coefficient; per-contact μs/μk hysteresis made rigid blocks fail progressively below atan μs).
+- Floors under pushed sand are rough (μ 1.2, `Factory.FLOOR_MU`): failure then happens inside the sand (wedge, avalanching flanks) instead of the whole heap gliding on the plate.
 - 64 or 96 steps change no test result; 48 is the cheapest that keeps them.
 
 ## Factory (godot/machine/factory.gd), one loop
-Enclosed inclined bucket elevator (33 small buckets 16×11 cm every 40 cm: a steady stream; casing walls continue the pit arc; spill stays inside) → head chute → belt A (pieces every 3 s while < 15 000 grains in the line) → press → two-stage shredder → mixer (map factory) or Galton board + bins + slide gate (map galton) → ram feeder (piston head 32×34 cm on a 6-stage telescopic cylinder from the furnace wall, phase-modulated so it is left of the outlet half the time: 50/50) → left: pit, right: furnace. Design rules learnt: no rounded edges sliding on floors (wedge-ejects grains); no overlapping colliders under sand (two springs flick grains up) — the ram's stages are drawn only and one rod collider spans head to barrel, length updated per frame (Factory.update), flush with the barrel; wiper seals (sole/gate 1 mm into the plate) instead of gaps. Galton map: full-width staggered peg field under a 6 cm throat (a triangle with side walls fed the outer bins).
+Enclosed inclined bucket elevator (33 small buckets 16×11 cm every 40 cm: a steady stream; casing walls continue the pit arc; spill stays inside) → head chute → belt A (pieces every 3 s while < 15 000 grains in the line) → press → two-stage shredder → mixer (map factory) or Galton board + bins + slide gate (map galton) → ram feeder (piston head 32×34 cm on a 6-stage telescopic cylinder from the furnace wall, phase-modulated so it is left of the outlet half the time: 50/50) → left: pit, right: furnace. Design rules learnt: no rounded edges sliding on floors (wedge-ejects grains); no overlapping colliders under sand (two springs flick grains up) — the ram's stages are drawn only and one rod collider spans head to barrel, length updated per frame (Factory.update), flush with the barrel; seals instead of gaps (gate 1 mm into its plate; ram sole 12 mm into the floor so the head's 2 mm corner never gets above a loaded grain — it wedged grains into the floor and shot them out at 10 m/s). Galton map: full-width staggered peg field under a 6 cm throat (a triangle with side walls fed the outer bins).
 
 ## Readability (wallpaper)
 Station badges (number, name, one line on what happens), faint drifting chevrons along the material path (render/flow.gd, Factory.flow_paths), sand drawn 15 % fuller than its contact radius, contact-count shading on heaps.
@@ -45,8 +48,9 @@ Station badges (number, name, one line on what happens), faint drifting chevrons
 - Remaining cost: ~10 ns per grain-step in dense heaps (contact model ~½). No memory growth over 2 min (objects, RAM, VRAM constant); GPU memory ~580 MB (grid bins 135 MB).
 
 ## Test status (48 steps)
-- PASS: T1 free fall (0.01 %), T2 repose 32–35°, T3 tilting plane (30° holds, 34° accelerates at exactly g(sinθ−μcosθ)), T4 Beverloo (2.4 %), T5 mixer (p99 1.8 m/s), T6 shredding (all to sand, none inside rollers), T7 conveyor, pusher (no grain past the sole), column collapse 2.36 (Lube: 2.4), clearance + no-touch audits.
-- T8 120 s: balance 0, nan 0, oob 0, grid overflow 0, 740 speed clamps (was > 2 million before the jam fixes), max overlap 0.97 r.
+- PASS: T1 free fall (0.01 %), T2 repose mean 31–33°, T3 tilting plane (30° holds, 34° accelerates at exactly g(sinθ−μcosθ)), T4 Beverloo (2 %), T5 mixer (Lacey 0.82 after 7 revolutions), T6 shredding (all to sand, none inside rollers), T7 conveyor, pusher (no grain past the sole), q_sand collapse 2.34 (Lube: 2.4) / impact ejecta 0.09 m / push (max grain speed 2.7 m/s, nothing shot out), q_press (largest chunk 685 of 888), clearance + no-touch audits.
+- T8 10 min (36 000 frames): balance 0, nan 0, oob 0, grid overflow 0, 0 speed clamps, max overlap 0.48 R.
+- Bench 50 k grains: ~9 ms per sim frame.
 - Diagnostics kept in the trace (`trace=1 trace_every=N`): clamp/oob positions and the prim touched; how every launch source above was found.
 
 ## Known issues / next

@@ -77,6 +77,7 @@ func setup(cap: int, world_size: Vector2, materials: Array = SimConst.MATERIALS)
 	active_n = cap
 	for k in ["vn", "rest"]:
 		_sbuf(k, cap * 8)
+	_sbuf("omega", cap * 4)
 	var none := PackedInt32Array()
 	none.resize(cap)
 	none.fill(-1)
@@ -114,7 +115,7 @@ func setup(cap: int, world_size: Vector2, materials: Array = SimConst.MATERIALS)
 		var le := log(maxf(m.restitution, 1e-4))
 		var zeta := -le / sqrt(PI * PI + le * le)
 		mat.append_array([m.mu_s, m.mu_k, zeta, 1.0 / SimConst.mass(m.density, radius)])
-		mat.append_array([0.0, m.get("break_strain", 1e9), m.density, 0.0])
+		mat.append_array([m.get("mu_roll", 0.0), m.get("break_strain", 1e9), m.density, 0.0])
 	_sbuf("mat", mat.size() * 4, mat.to_byte_array())
 	m_ref = SimConst.mass(materials[0].density, radius)
 
@@ -178,6 +179,7 @@ func write(offset: int, x: PackedVector2Array, v: PackedVector2Array, info: Pack
 	none.resize(n)
 	none.fill(-1)
 	rd.buffer_update(_buf.rank, offset * 4, n * 4, none.to_byte_array())
+	rd.buffer_clear(_buf.omega, offset * 4, n * 4)
 	rd.buffer_update(_buf.xv, offset * 16, n * 16, xv.to_byte_array())
 	rd.buffer_update(_buf.info, offset * 4, n * 4, info.to_byte_array())
 	rd.buffer_update(_buf.color, offset * 4, n * 4, color.to_byte_array())
@@ -422,7 +424,7 @@ func _make_set(shader: RID, h_in: String, h_out: String) -> RID:
 	var order := {2: "vn", 3: "hxi_" + h_out, 4: "info", 5: "color", 6: "bin_count", 7: "bins",
 		9: "stats", 10: "mat", 11: "", 12: "xv", 13: "bodies", 14: "prims", 15: "bonds", 16: "hkey_" + h_in,
 		17: "hkey_" + h_out, 18: "hxi_" + h_in, 19: "rest",
-		20: "body_of", 21: "rb", 22: "pieces", 24: "pgrid", 25: "pbound", 26: "order", 27: "block_count", 28: "block_cursor", 29: "acc", 30: "plist", 31: "stage", 32: "rank"}
+		20: "body_of", 21: "rb", 22: "pieces", 24: "pgrid", 25: "pbound", 26: "order", 27: "block_count", 28: "block_cursor", 29: "acc", 30: "plist", 31: "stage", 32: "rank", 33: "omega"}
 	var us: Array[RDUniform] = []
 	for b in order:
 		var u := RDUniform.new()
@@ -437,7 +439,7 @@ func _make_set(shader: RID, h_in: String, h_out: String) -> RID:
 	return rd.uniform_set_create(us, shader, 0)
 
 
-const STATE_BUFFERS := ["xv", "rank", "info", "color", "bonds", "hkey_a", "hkey_b", "hxi_a", "hxi_b", "rest", "body_of", "rb", "acc", "pieces", "plist"]
+const STATE_BUFFERS := ["xv", "rank", "info", "color", "bonds", "hkey_a", "hkey_b", "hxi_a", "hxi_b", "rest", "body_of", "rb", "acc", "pieces", "plist", "omega"]
 
 
 ## Snapshot of the full particle/body state (zstd-compressed var file) plus

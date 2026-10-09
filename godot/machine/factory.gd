@@ -26,8 +26,11 @@ const BUCKET_SIZE := Vector2(0.16, 0.11)
 const BUCKET_PITCH := 0.4
 ## Pusher head (car-piston sized: 32 × 34 cm), sweep period and telescopic stages.
 const PUSHER_HALF := Vector2(0.16, 0.17)
+const SOLE_DEPTH := 0.012
 const PUSHER_PERIOD := 18.0
 const STAGES := 6
+## Friction of the ribbed floor plate (contact friction is the mean with sand's 0.6).
+const FLOOR_MU := 1.2
 ## Collision half height of the ram's rod (all stages and the barrel, flush).
 const ROD_HALF := 0.095
 
@@ -290,10 +293,17 @@ func _pusher() -> void:
 	# right into the furnace. Sand from the outlet lands on the side of the head
 	# that faces the outlet; the stroke is phase-modulated so the head is left of
 	# the outlet exactly half the time: a 50/50 split. Every stage collides.
-	add_segment(Vector2(floor_x.x, Y_FLOOR), Vector2(floor_x.y, Y_FLOOR), 0.025)
+	# Ribbed floor plate: rougher than sand on sand, so a pushed heap shears and
+	# builds a wedge in front of the head instead of gliding off as one block.
+	var fl := add_segment(Vector2(floor_x.x, Y_FLOOR), Vector2(floor_x.y, Y_FLOOR), 0.025, "floor")
+	prims[fl].mu_s = FLOOR_MU
+	prims[fl].mu_k = FLOOR_MU
 	var half := PUSHER_HALF
-	# Sole 1 mm into the floor plate: a wiper seal, nothing passes underneath.
-	var y := Y_FLOOR + 0.025 - 0.001 + half.y
+	# Sole SOLE_DEPTH into the floor plate: a seal, nothing passes underneath, and
+	# the face stays flat down past the deepest a loaded grain sinks into the
+	# floor (the 2 mm corner must never get above a grain: it wedges it down and
+	# shoots it out).
+	var y := Y_FLOOR + 0.025 - SOLE_DEPTH + half.y
 	var home := Vector2(floor_x.y + 0.02 + half.x, y)
 	var stroke := home.x - (floor_x.x + 0.04 + half.x)
 	pusher_body = add_body(home, 0.0, "pusher")

@@ -38,6 +38,8 @@ func make_solver(cap: int, world: Vector2, sub := SimConst.SUBSTEPS) -> GpuSolve
 		m.mu_s = float(args.get("mu", m.mu_s))
 		m.mu_k = float(args.get("muk", args.get("mu", m.mu_k)))
 		m.restitution = float(args.get("e", m.restitution))
+		if m.name == "sand":
+			m.mu_roll = float(args.get("mur", m.get("mu_roll", 0.0)))
 	s.setup(cap, world, mats)
 	solver = s
 	return s

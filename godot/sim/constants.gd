@@ -27,15 +27,18 @@ const CRUSH_G := 300.0
 const RIGID_DAMP_MASS := 16.0
 
 const SAND_DENSITY := 1600.0
-## Grain friction 0.35 (non-rotating discs) is calibrated against two dry-sand
-## references: angle of repose ≈ 32° (T2) and quasi-2D column collapse runout
-## (L∞ - L0)/L0 ≈ 1.2 a (Lube et al. 2005) (tests/q_sand.gd).
+## Sand grains rotate (inertia of a sphere); sliding friction 0.6 and rolling
+## resistance 0.65 (x radius, emulating angular grains) are calibrated against two
+## dry-sand references: angle of repose ≈ 32° (T2) and quasi-2D column collapse
+## runout (L∞ - L0)/L0 ≈ 1.2 a (Lube et al. 2005) (tests/q_sand.gd).
+## Restitution 0.1: at 0.4 grains squeezed under the press (overlap ~R) came out
+## at 5 m/s and left the world; impacts and pushing hardly differ between the two.
 const REPOSE_DEG := 32.0
 
 ## Material table. id = index. Colors live per particle, not per material.
 const MATERIALS := [
-	{"name": "sand", "mu_s": 0.35, "mu_k": 0.35, "restitution": 0.1, "density": SAND_DENSITY},
-	{"name": "piece", "mu_s": 0.6249, "mu_k": 0.6249, "restitution": 0.03, "density": SAND_DENSITY,
+	{"name": "sand", "mu_s": 0.6, "mu_k": 0.6, "restitution": 0.1, "mu_roll": 0.65, "density": SAND_DENSITY},
+	{"name": "piece", "mu_s": 0.6249, "mu_k": 0.6249, "restitution": 0.03, "mu_roll": 0.3, "density": SAND_DENSITY,
 		"break_strain": 0.04},
 ]
 

@@ -104,10 +104,11 @@ float prim_sdf_grad(Prim pr, vec2 q, out vec2 g) {
 // Contact of a disc (centre p, radius rad) with prim pr at time t: unit normal n
 // (out of the surface), penetration pen > 0, surface velocity vs at the contact
 // (rigid motion plus belt surface speed on the carrying face). False: no contact.
-bool prim_contact(Prim pr, vec2 p, float t, float rad, out vec2 n, out float pen, out vec2 vs) {
+bool prim_contact(Prim pr, vec2 p, float t, float rad, out vec2 n, out float pen, out vec2 vs, out float ws) {
 	n = vec2(0.0);
 	pen = 0.0;
 	vs = vec2(0.0);
+	ws = 0.0;
 	vec2 bpos, bvel;
 	float bang, bom;
 	body_pose(pr.head.y, t, bpos, bang, bvel, bom);
@@ -118,6 +119,7 @@ bool prim_contact(Prim pr, vec2 p, float t, float rad, out vec2 n, out float pen
 	n = rot(bang) * g;
 	pen = rad - d;
 	vs = bvel + bom * vec2(-rp.y, rp.x);
+	ws = bom;
 	// Belt drive acts on the carrying (upper, flat) face only.
 	vec2 up = rot(bang) * rot(pr.xf.z) * vec2(0.0, 1.0);
 	if (dot(n, up) > 0.9) vs += pr.surf.w * vec2(up.y, -up.x);

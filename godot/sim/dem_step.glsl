@@ -20,6 +20,8 @@ layout(local_size_x = WG) in;
 
 // Chipping: a point load above CHIP_FRAC x crush_f (300 grain weights) for
 // CHIP_STEPS. Distributed loads (a press face) break the body first (dem_rigid).
+#define OVERLAP_KNEE 0.15
+#define STIFF_SLOPE 3.0
 #define CHIP_FRAC 1.0
 #define CHIP_STEPS 2.0
 
@@ -63,16 +65,41 @@ void add_damper(float c, vec2 n, bool normal, vec2 v_other) {
 // n: unit normal towards i, pen: overlap, vrel: velocity of i relative to the
 // other side at the contact, meff: effective mass for damping, zeta: damping ratio,
 // ks: stiffness multiplier (rigid bodies against machines/rigid bodies, see main).
-vec2 contact_force(uint key, vec2 n, float pen, vec2 vrel, vec2 v_other, float meff, float zeta, float mu_s, float mu_k, float ks) {
+// Own spin, radius and inertia of the grain this thread updates; contact torques.
+float w_i = 0.0;
+float r_i = 0.0;
+float inertia_i = 1.0;
+float tq = 0.0;
+// Rolling resistance, implicit in the grain's own spin (like the dashpots):
+// torque c (w_other - w_i'), c = mu_r reff fn / |w_rel|, so it saturates at
+// mu_r reff fn and can stop rolling without overshoot. Sums: c, c w_other.
+float roll_c = 0.0;
+float roll_b = 0.0;
+
+// Elastic + friction force on particle i from one contact (dampers go to D, B;
+// torques to tq). n: unit normal towards i, pen: overlap, vrel: velocity of i
+// relative to the other side, v_other: the other side's velocity, wsum: spin
+// part of the contact slip (w_i r_i + w_j r_j), wrel: relative spin (rolling),
+// reff: rolling radius, mu_r: rolling resistance, meff: effective mass for
+// damping, zeta: damping ratio, ks: stiffness multiplier.
+vec2 contact_force(uint key, vec2 n, float pen, vec2 vrel, vec2 v_other, float wsum, float wrel, float reff,
+		float meff, float zeta, float mu_s, float mu_k, float mu_r, float ks) {
 	float kn = pc.kn * ks;
 	float kt = pc.kt * ks;
 	float vn = dot(vrel, n);
-	float gn = 2.0 * zeta * sqrt(kn * meff);
-	float fn = kn * pen - gn * vn;
-	// gt = 2 zeta sqrt(kt meff) = gn sqrt(kt / kn) = gn sqrt(2 / 7).
+	// Stiffening beyond OVERLAP_KNEE: real grains are far stiffer than a 7-step
+	// contact time allows, and under heavy load (a blade pushing a 0.5 m heap)
+	// linear springs let grains sink into each other by a whole radius. Slope
+	// STIFF_SLOPE x kn keeps the local contact time above 4 steps.
+	float knee = OVERLAP_KNEE * pc.r;
+	float fe_n = kn * (pen + (STIFF_SLOPE - 1.0) * max(pen - knee, 0.0));
+	float gn = 2.0 * zeta * sqrt(kn * (pen > knee ? STIFF_SLOPE : 1.0) * meff);
+	float fn = fe_n - gn * vn;
 	if (fn <= 0.0) return vec2(0.0);  // separating fast: no tension, spring released
 	add_damper(gn, n, true, v_other);
-	vec2 vt = vrel - vn * n;
+	// Slip velocity at the contact point, including both grains' spin.
+	vec2 tdir = vec2(n.y, -n.x);
+	vec2 vt = vrel - vn * n + wsum * tdir;
 	// Spring from the last step, projected into the current tangent plane (the
 	// contact turns by well under a degree per step).
 	bool sliding;
@@ -84,14 +111,28 @@ vec2 contact_force(uint key, vec2 n, float pen, vec2 vrel, vec2 v_other, float m
 	// sliding at mu_k fn until the shear relaxes below that (then it sticks again).
 	float fe = kt * length(xi);
 	sliding = sliding ? fe >= mu_k * fn : fe > mu_s * fn;
+	vec2 ft;
 	if (sliding) {
 		xi *= mu_k * fn / fe;
+		ft = -kt * xi;
 		hist_put(key, xi, true);
-		return kn * pen * n - kt * xi;
+	} else {
+		float gt = gn * 0.53452248;  // 2 zeta sqrt(kt meff), kt / kn = 2/7
+		ft = -kt * xi;
+		hist_put(key, xi, false);
+		// Tangential dashpot: implicit on the linear velocity (the spin part of
+		// the slip enters as a shift of the other side's velocity) ...
+		add_damper(gt, n, false, v_other - wsum * tdir);
+		// ... and explicit (current slip) for the torque.
+		tq += -r_i * (n.x * (-gt * vt.y) - n.y * (-gt * vt.x));
 	}
-	hist_put(key, xi, false);
-	add_damper(gn * 0.53452248, n, false, v_other);
-	return kn * pen * n - kt * xi;
+	// Torque of the tangential force about the grain's centre (contact at -r_i n).
+	tq += -r_i * (n.x * ft.y - n.y * ft.x);
+	// Rolling resistance (angular grains), applied implicitly in main.
+	float c = min(mu_r * reff * fn / max(abs(wrel), 1e-6), 1e3 * inertia_i / pc.dt);
+	roll_c += c;
+	roll_b += c * (w_i - wrel);
+	return fe_n * n + ft;
 }
 
 void main() {
@@ -115,6 +156,7 @@ void main() {
 	vec2 vi = xvi.zw;
 	uint body = 0u;
 	vec2 arm = vec2(0.0);
+	float body_omega = 0.0;
 	if (kind == KIND_RIGID) {
 		body = BODY_OF[i];
 		Body B = body_now(body);
@@ -124,13 +166,18 @@ void main() {
 			for (uint q = 0u; q < ACC_STRIDE; q++) ACC[z + q] = 0.0;
 		}
 		arm = rot(B.c.z) * (REST[i] - B.ex.xy);
+		body_omega = B.v.z;
 		xi = B.c.xy + arm;
 		vi = B.v.xy + B.v.z * vec2(-arm.y, arm.x);
 	}
 	float ri = rad_of(info);
 	uint mat = mat_of(info);
 	vec4 mi = MAT[2u * mat];
+	float mr_i = MAT[2u * mat + 1u].x;
 	float m_i = mass_of(info, ri);
+	r_i = ri;
+	inertia_i = 0.4 * m_i * ri * ri;
+	w_i = kind == KIND_RIGID ? body_omega : W[i];
 	bool rigid = kind == KIND_RIGID;
 	float md_i = rigid ? m_i * pc.rigid_damp_mass : m_i;
 
@@ -179,8 +226,10 @@ void main() {
 				float md_j = kj == KIND_RIGID ? m_j * pc.rigid_damp_mass : m_j;
 				vec4 mj = MAT[2u * matj];
 				vec2 vj = unpackHalf2x16(e.z);
-				f += contact_force(j + 1u, n, pen, vi - vj, vj, md_i * md_j / (md_i + md_j),
-						0.5 * (mi.z + mj.z), 0.5 * (mi.x + mj.x), 0.5 * (mi.y + mj.y), 1.0);
+				float wj = W[j];
+				f += contact_force(j + 1u, n, pen, vi - vj, vj, w_i * ri + wj * rj, w_i - wj, ri * rj / (ri + rj),
+						md_i * md_j / (md_i + md_j), 0.5 * (mi.z + mj.z), 0.5 * (mi.x + mj.x), 0.5 * (mi.y + mj.y),
+						0.5 * (mr_i + MAT[2u * matj + 1u].x), 1.0);
 				max_pen = max(max_pen, pen / min(ri, rj));
 				n_contacts++;
 			}
@@ -194,6 +243,7 @@ void main() {
 		for (uint gi = 1u; gi <= pcnt + 4u; gi++) {
 			vec2 n, vs;
 			float pen;
+			float ws = 0.0;
 			uint key;
 			vec2 mu = mi.xy;
 			if (gi <= pcnt) {
@@ -201,7 +251,7 @@ void main() {
 				// Out of reach, sink/heat zone or visual-only: skip without loading the prim.
 				if (!in_bound(pid, xi, ri) || (prim_flags(pid) & 14u) != 0u) continue;
 				Prim pr = PRIMS[pid];
-				if (!prim_contact(pr, xi, pc.t_sub, ri, n, pen, vs)) continue;
+				if (!prim_contact(pr, xi, pc.t_sub, ri, n, pen, vs, ws)) continue;
 				key = KEY_PRIM | pid;
 				mu = 0.5 * (mi.xy + pr.surf.xy);
 				last_prim = pid;
@@ -213,7 +263,7 @@ void main() {
 				vs = vec2(0.0);
 				key = KEY_PRIM | (0xfff0u + w);
 			}
-			vec2 fc = contact_force(key, n, pen, vi - vs, vs, md_i, mi.z, mu.x, mu.y, 1.0);
+			vec2 fc = contact_force(key, n, pen, vi - vs, vs, w_i * ri, w_i - ws, ri, md_i, mi.z, mu.x, mu.y, mr_i, 1.0);
 			f += fc;
 			if (gi <= pcnt && (prim_flags(PGRID[pcell + gi]) & 16u) != 0u) {
 				// Force sensor (e.g. the press's pressure relief, read on the CPU).
@@ -249,7 +299,7 @@ void main() {
 		// of them), then one atomic per sum. Hundreds of grains adding to the same
 		// 12 addresses directly would serialise on the atomics.
 		vec4 pr = vec4(ft.x, ft.y, dot(ft, vec2(0.70710678, 0.70710678)), dot(ft, vec2(-0.70710678, 0.70710678)));
-		vec4 sa = vec4(ft, arm.x * ft.y - arm.y * ft.x, 0.0);
+		vec4 sa = vec4(ft, arm.x * ft.y - arm.y * ft.x + tq, 0.0);
 		vec4 hp = max(pr, vec4(0.0));
 		vec4 hn = max(-pr, vec4(0.0));
 		if (subgroupAny(ft.x != 0.0 || ft.y != 0.0)) {
@@ -289,6 +339,7 @@ void main() {
 			cc = 0.0;
 		}
 		VN[i] = vec2(cc, length(ft));  // chip counter, last load (dem_rigid finds the contact)
+		W[i] = body_omega;
 		XV[i] = vec4(xi, vi);
 		bin_insert(i, info, xi, vi);
 		if (last) imageStore(RENDER_IMG, texel, vec4(xi, float(COLOR[i] & 0xffffffu), float(render_w(kind, info, heat_of(info), n_contacts))));
@@ -300,6 +351,8 @@ void main() {
 	vec3 a = vec3(m_i, 0.0, m_i) + pc.dt * dmp_d;
 	float det = a.x * a.z - a.y * a.y;
 	vec2 v = vec2(a.z * rhs.x - a.y * rhs.y, a.x * rhs.y - a.y * rhs.x) / det * pc.damp;
+	// (I + dt C) w' = I w + dt (tq + B)
+	W[i] = (inertia_i * w_i + pc.dt * (tq + roll_b)) / (inertia_i + pc.dt * roll_c) * pc.damp;
 	float sp = length(v);
 	if (sp > pc.v_max) {
 		v *= pc.v_max / sp;

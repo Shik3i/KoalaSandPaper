@@ -59,6 +59,9 @@
 #define PRIM_BOX 2u
 #define PRIM_ARC 3u
 
+// Angular velocity of each grain (rad/s, CCW). Grains are spheres for inertia:
+// I = 2/5 m r^2. Rigid grains carry their body's.
+layout(set = 0, binding = 33, std430) restrict buffer OmegaBuf { float W[]; };
 // Rigid grains: x = chip counter (dem_step); dem_rigid uses x briefly for crack regions.
 layout(set = 0, binding = 2, std430) restrict buffer VNBuf { vec2 VN[]; };
 // bits 0-7 material, 8-15 kind, 16-23 radius code, 24-31 heat (glow; burns in heat zones).
@@ -71,7 +74,7 @@ layout(set = 0, binding = 6, std430) restrict buffer BinCountBuf { uint BIN_COUN
 layout(set = 0, binding = 7, std430) restrict buffer BinBuf { uvec4 BINS[]; };
 layout(set = 0, binding = 9, std430) restrict buffer StatsBuf { uint STATS[]; };
 // Per material two vec4: [2m] = (mu_s, mu_k, zeta (damping ratio), inv_mass_ref),
-// [2m+1] = (unused, break_strain, density, 0). Mass scales with r^3.
+// [2m+1] = (mu_roll (rolling resistance, x radius), break_strain, density, 0). Mass scales with r^3.
 layout(set = 0, binding = 10, std430) restrict readonly buffer MatBuf { vec4 MAT[]; };
 layout(set = 0, binding = 11, rgba32f) uniform restrict writeonly image2D RENDER_IMG;
 // Packed (position, velocity) at the step start: one coalesced read per neighbour.

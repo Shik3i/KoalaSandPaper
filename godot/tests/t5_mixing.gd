@@ -1,7 +1,8 @@
 extends SimTest
 ## T5: the factory mixer (bowl + 3-blade rotor) with its outlet closed. Two
 ## colour halves; Lacey mixing index per rotor revolution must rise from < 0.2
-## to > 0.8 within 6 revolutions; over 60 s no grain may leave the bowl (sink 1
+## to > 0.8 within 8 revolutions (6 with the old non-rotating sand, μ 0.35:
+## rougher, rolling grains mix more slowly); over 70 s no grain may leave the bowl (sink 1
 ## catches anything that does). Also reports grain speed percentiles in the bowl.
 
 const N := 9000
@@ -38,7 +39,7 @@ func tick() -> bool:
 		_speeds()
 	if is_equal_approx(fmod(solver.sim_time + 1e-6, rev), 0.0) or fmod(solver.sim_time, rev) < SimConst.DT:
 		_sample()
-	return solver.sim_time >= float(args.get("secs", 60.0))
+	return solver.sim_time >= float(args.get("secs", 70.0))
 
 
 func _sample() -> void:
@@ -110,7 +111,7 @@ func result() -> Dictionary:
 	var st := solver.read_stats()
 	var m0: float = lacey[0].M if lacey.size() > 0 else -1.0
 	var reached := false
-	for k in mini(lacey.size(), 7):
+	for k in mini(lacey.size(), 9):
 		reached = reached or lacey[k].M > 0.8
 	return {"pass": m0 < 0.2 and reached and sinks[1] == 0, "lacey_per_rev": lacey, "leaked": sinks[1],
 		"tip_speed": snappedf(absf(Factory.ROTOR_OMEGA) * 0.78, 0.01), "speed_t_p50_p99_max": speed.slice(0, 40, 4),

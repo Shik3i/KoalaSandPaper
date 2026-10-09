@@ -55,6 +55,7 @@ float rnd(uint h) { return float(hash(h) & 0xffffu) / 65535.0; }
 void free_grain(uint i, Body B) {
 	vec2 r = rot(B.c.z) * (REST[i] - B.ex.xy);
 	XV[i] = vec4(B.c.xy + r, B.v.xy + B.v.z * vec2(-r.y, r.x));
+	W[i] = B.v.z;
 	// Crumbled pieces become ordinary sand (material 0).
 	INFO[i] = (INFO[i] & ~0xffffu) | (KIND_GRAIN << 8u);
 }

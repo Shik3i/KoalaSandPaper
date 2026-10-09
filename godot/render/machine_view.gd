@@ -11,7 +11,7 @@ extends Node2D
 const STEEL := {
 	"wall": Color("#56696f"), "belt": Color("#2a3338"), "roller": Color("#7b9089"), "rotor": Color("#748a84"),
 	"piston": Color("#a3b2ad"), "rod": Color("#9fb0ab"), "bucket": Color("#8ea19b"), "cleat": Color("#a9b8b3"),
-	"drum": Color("#3a484d"), "peg": Color("#9db0aa"), "": Color("#56696f"),
+	"drum": Color("#3a484d"), "peg": Color("#9db0aa"), "floor": Color("#56696f"), "": Color("#56696f"),
 }
 const HAZARD := Color("#e0a93b")
 ## Static styles drawn above the moving parts.
