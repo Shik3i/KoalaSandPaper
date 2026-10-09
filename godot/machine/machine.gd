@@ -12,6 +12,8 @@ const FLAG_SINK := 2
 const FLAG_VISUAL := 4
 ## Heat zone: grains inside heat up (glow) and burn (removed, counted on sink_id) when hot.
 const FLAG_HEAT := 8
+## Contact forces on this prim are summed into force sensor `sink_id` (GpuSolver.sensors).
+const FLAG_SENSE := 16
 const MU := Vector2(0.6249, 0.6249)
 ## Coarse collider grid (CPU-built per frame): cell size and max prims per cell.
 const PCELL := 0.2
@@ -57,6 +59,48 @@ func piston(body: int, axis: Vector2, stroke: float, period: float, phase := 0.0
 ## a ≠ 0 makes it run slower on one side (|a| < 1 keeps it moving).
 func piston_swept(body: int, axis: Vector2, stroke: float, period: float, a: float) -> void:
 	bodies[body].motion = {"kind": "swept", "axis": axis.normalized(), "stroke": stroke, "period": period, "a": a}
+
+
+## Force-limited hydraulic stroke (pressure relief valve): every `period` s the
+## body travels along `axis` at v_down until it reaches `stroke` or the force on
+## its FLAG_SENSE prims (sensor `sensor`) exceeds f_max, then returns at v_up.
+## Stateful, advanced by drive(); pose() falls back to a plain piston of the same
+## stroke when undriven (audits sample arbitrary times).
+func hydraulic(body: int, axis: Vector2, stroke: float, period: float, v_down: float, v_up: float,
+		f_max: float, sensor: int) -> void:
+	bodies[body].motion = {"kind": "hydraulic", "axis": axis.normalized(), "stroke": stroke, "period": period,
+		"v_down": v_down, "v_up": v_up, "f_max": f_max, "sensor": sensor, "driven": false, "y": 0.0, "vy": 0.0,
+		"state": 0, "cycle": -1, "stalls": 0}
+
+
+## Advances stateful drives by dt at time t with the solver's sensor forces
+## (force on the grains, so the machine feels the opposite).
+func drive(dt: float, t: float, sensors: Array) -> void:
+	for b in bodies:
+		var m: Dictionary = b.motion
+		if m.kind != "hydraulic":
+			continue
+		m.driven = true
+		var cycle := floori(t / m.period)
+		if cycle != m.cycle:
+			m.cycle = cycle
+			m.state = 1
+		var load: float = (sensors[m.sensor] as Vector2).dot(m.axis)
+		m.max_load = maxf(m.get("max_load", 0.0), load)
+		m.vy = 0.0
+		if m.state == 1:
+			m.vy = m.v_down
+			# Return once the load approaches the limit (the GPU holds the head at
+			# the limit meanwhile): a stamp blow, not a grind.
+			if m.y >= m.stroke or load > 0.7 * m.f_max:
+				m.state = 2
+				m.stalls += int(load > 0.7 * m.f_max)
+		if m.state == 2:
+			m.vy = -m.v_up
+			if m.y <= 0.0:
+				m.state = 0
+				m.vy = 0.0
+		m.y = clampf(m.y + m.vy * dt, 0.0, m.stroke)
 
 
 ## Telescopic stage: pose = anchor + (target pose + target_off - anchor) * f + off.
@@ -268,6 +312,11 @@ func pose(b: Dictionary, t: float) -> Array:
 		"loop":
 			var lp := loop_pose(m.p0, m.p1, m.rr, m.s0 + m.speed * t)
 			return [lp[0], b.home_angle + lp[1]]
+		"hydraulic":
+			if m.driven:
+				return [b.home + m.axis * m.y, b.home_angle]
+			var hp: float = TAU * t / m.period
+			return [b.home + m.axis * m.stroke * (1.0 - cos(hp)) * 0.5, b.home_angle]
 		"follow":
 			var tp: Vector2 = pose(bodies[m.target], t)[0] + m.target_off
 			return [m.anchor + (tp - m.anchor) * m.f + m.off, b.home_angle]
@@ -289,6 +338,9 @@ func update(t: float) -> void:
 		var dt := (t + e) - maxf(t - e, 0.0)
 		b.vel = (p1[0] - p0[0]) / dt
 		b.omega = wrapf(p1[1] - p0[1], -PI, PI) / dt
+	for b in bodies:
+		if b.motion.kind == "hydraulic" and b.motion.driven:
+			b.vel = b.motion.axis * b.motion.vy
 
 
 ## World transform of a body at the current time.
@@ -299,7 +351,24 @@ func body_xform(b: int) -> Transform2D:
 func pack_bodies() -> PackedFloat32Array:
 	var f := PackedFloat32Array()
 	for b in bodies:
-		f.append_array([b.pos.x, b.pos.y, b.angle, 0.0, b.vel.x, b.vel.y, b.omega, 0.0])
+		# w: force-sensor id + 1 for force-limited (hydraulic) bodies (colliders.glsli).
+		var sense: float = b.motion.sensor + 1.0 if b.motion.kind == "hydraulic" else 0.0
+		f.append_array([b.pos.x, b.pos.y, b.angle, sense, b.vel.x, b.vel.y, b.omega, 0.0])
+	return f
+
+
+## Per sensor (4): axis.xy, force limit, commanded speed along the axis.
+func pack_sensors() -> PackedFloat32Array:
+	var f := PackedFloat32Array()
+	f.resize(16)
+	for b in bodies:
+		var m: Dictionary = b.motion
+		if m.kind == "hydraulic":
+			var o: int = 4 * m.sensor
+			f[o] = m.axis.x
+			f[o + 1] = m.axis.y
+			f[o + 2] = m.f_max
+			f[o + 3] = m.vy if m.driven else 0.0
 	return f
 
 
@@ -402,7 +471,7 @@ func upload(solver: GpuSolver) -> void:
 	var g := pack_grid(SimConst.DT)
 	if _prim_bytes.size() != prims.size() * 64:
 		_prim_bytes = pack_prims()
-	solver.set_colliders(pack_bodies(), _prim_bytes, g, grid_dims(), bounds)
+	solver.set_colliders(pack_bodies(), _prim_bytes, g, grid_dims(), bounds, pack_sensors())
 
 
 ## CPU mirror of colliders.glsli prim_sdf (spawn placement, tests).

@@ -46,6 +46,7 @@ func make_solver(cap: int, world: Vector2, sub := SimConst.SUBSTEPS) -> GpuSolve
 func step() -> void:
 	if machine:
 		machine.world = solver.world
+		machine.drive(SimConst.DT, solver.sim_time, solver.sensors)
 		machine.update(solver.sim_time)
 		machine.upload(solver)
 	solver.step()

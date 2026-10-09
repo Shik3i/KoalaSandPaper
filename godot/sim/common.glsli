@@ -59,7 +59,7 @@
 #define PRIM_BOX 2u
 #define PRIM_ARC 3u
 
-// Contact force of rigid grains (dem_step → dem_rigid).
+// Rigid grains: x = chip counter (dem_step); dem_rigid uses x briefly for crack regions.
 layout(set = 0, binding = 2, std430) restrict buffer VNBuf { vec2 VN[]; };
 // bits 0-7 material, 8-15 kind, 16-23 radius code, 24-31 heat (glow; burns in heat zones).
 layout(set = 0, binding = 4, std430) restrict buffer InfoBuf { uint INFO[]; };
@@ -110,6 +110,8 @@ layout(set = 0, binding = 22, std430) restrict buffer PieceBuf { uvec4 PIECES[];
 // Rigid-body force accumulators, three slots by step: per body force.xy, torque,
 // then the 8 directional half-sums of the crush measure (atomicAdd by grains).
 // Slot 11: largest single-grain contact force (float bits, atomicMax as uint).
+// After the 3 slots: force sensors (SENSE_BASE + 2 s: summed contact force on
+// grains from prims flagged FLAG_SENSE with sensor id s; cleared every frame).
 layout(set = 0, binding = 29, std430) restrict buffer AccBuf { float ACC[]; };
 layout(set = 0, binding = 29, std430) restrict buffer AccUBuf { uint ACC_U[]; };
 // Piece grain lists (slot indices, MAX_PIECE_GRAINS per piece) and spawn staging:
@@ -169,11 +171,19 @@ layout(push_constant, std430) uniform Params {
 #define NSUB 8u
 #define MAX_RB 2048u
 #define ACC_STRIDE 12u
+#define SENSE_BASE (3u * MAX_RB * ACC_STRIDE)
+// Per-step sensor sums (3 slots by step x 4 sensors x 2), yield state (2 halves
+// x 4 sensors x (offset, rate)), CPU-written config (4 sensors x (axis.xy,
+// f_max, commanded speed along the axis)).
+#define SENSE_STEP (SENSE_BASE + 8u)
+#define SENSE_YIELD (SENSE_BASE + 32u)
+#define SENSE_CFG (SENSE_BASE + 48u)
+#define YIELD_RELAX 0.3
 // A squeezed body breaks within a few steps: a press or nip keeps closing at
 // ~0.5 m/s, and every step of delay is overlap that would be released explosively.
 #define CRUSH_STEPS 4.0
-#define CRUSH_WEIGHTS 3.0
 #define OMEGA_MAX 20.0
+#define COOLDOWN 576.0
 
 uint kind_of(uint info) { return (info >> 8u) & 0xffu; }
 uint heat_of(uint info) { return info >> 24u; }
@@ -309,12 +319,45 @@ Body body_now(uint b) {
 	// Crush: force pushing from both sides at once, max over 4 directions.
 	float squeeze = 0.0;
 	for (uint d = 0u; d < 4u; d++) squeeze = max(squeeze, min(ACC[a + 3u + 2u * d], ACC[a + 4u + 2u * d]));
-	// Chunks (generation 1) are already cracked: weaker than whole pieces.
-	float limit = B.aux.x < 0.5 ? max(pc.crush_f, CRUSH_WEIGHTS * M * length(pc.gravity))
-			: max(pc.crush_f / 3.0, M * length(pc.gravity));
+	// Brittle strength ~ stress x contact width: in 2D the critical force grows
+	// with the square root of the grain count (a fragment half the size is not half
+	// as strong). 888 grains (a tetromino): ~2000 grain weights.
+	float limit = pc.crush_f * max(1.0, 0.22 * sqrt(B.ex.w));
 	// Point load: squeezed (two-sided) while a single grain carries more than
-	// crush_f (a press on one corner) breaks the body before that grain sinks deep.
-	bool point = squeeze > pc.crush_f / 3.0 && ACC[a + 11u] > pc.crush_f;
-	B.ex.z = squeeze > limit || point ? B.ex.z + 1.0 : max(B.ex.z - 0.25, 0.0);
+	// 2 crush_f (a press on one corner) breaks the body before that grain sinks deep.
+	bool point = squeeze > pc.crush_f && ACC[a + 11u] > 2.0 * pc.crush_f;
+	// A fresh fragment (aux.z = stamp of its fracture) cannot break again for
+	// COOLDOWN steps: the crack relieved its stress and the pieces shift before
+	// they are loaded again (machines hold at their force limit meanwhile).
+	bool cool = float(pc.stamp) - B.aux.z < COOLDOWN;
+	B.ex.z = (squeeze > limit || point) && !cool ? B.ex.z + 1.0 : max(B.ex.z - 0.25, 0.0);
 	return B;
+}
+
+// Pressure relief on the GPU: a machine body with a force sensor holds its
+// position (lags behind its commanded motion by offset o <= 0 along the sensor
+// axis) during any step after one in which its contact force exceeded f_max,
+// and catches up at YIELD_RELAX m/s otherwise. Every thread evaluates this
+// identically from last step's state; thread 0 of dem_step stores it.
+vec2 yield_now(uint s) {
+	uint prev = pc.stamp - 1u;
+	float o = ACC[SENSE_YIELD + 8u * (prev & 1u) + 2u * s];
+	uint c = SENSE_CFG + 4u * s;
+	vec2 axis = vec2(ACC[c], ACC[c + 1u]);
+	uint ss = SENSE_STEP + 8u * (prev % 3u) + 2u * s;
+	float f = dot(vec2(ACC[ss], ACC[ss + 1u]), axis);
+	float on = f > ACC[c + 2u] ? o - max(ACC[c + 3u], 0.0) * pc.dt : min(o + YIELD_RELAX * pc.dt, 0.0);
+	return vec2(on, (on - o) / pc.dt);
+}
+
+void yield_store() {
+	for (uint s = 0u; s < 4u; s++) {
+		if (ACC[SENSE_CFG + 4u * s + 2u] <= 0.0) continue;
+		vec2 y = yield_now(s);
+		ACC[SENSE_YIELD + 8u * (pc.stamp & 1u) + 2u * s] = y.x;
+		ACC[SENSE_YIELD + 8u * (pc.stamp & 1u) + 2u * s + 1u] = y.y;
+		uint z = SENSE_STEP + 8u * ((pc.stamp + 1u) % 3u) + 2u * s;
+		ACC[z] = 0.0;
+		ACC[z + 1u] = 0.0;
+	}
 }

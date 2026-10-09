@@ -61,6 +61,10 @@ var _stamp := 1
 ## Contact history buffer read this step (0: hist_a → hist_b, 1: reverse).
 var _hist := 0
 var _n_blocks := 0
+## Mean contact force per step on the grains touching each sensor prim, from the
+## last finished frame (async readback, 1-2 frames old).
+var sensors: Array[Vector2] = [Vector2.ZERO, Vector2.ZERO, Vector2.ZERO, Vector2.ZERO]
+var _sense_pending := false
 
 
 func setup(cap: int, world_size: Vector2, materials: Array = SimConst.MATERIALS) -> void:
@@ -85,7 +89,7 @@ func setup(cap: int, world_size: Vector2, materials: Array = SimConst.MATERIALS)
 	_sbuf("body_of", cap * 4, none.to_byte_array())
 	# Bodies: two halves (see body_now in common.glsli); force accumulators: three slots.
 	_sbuf("rb", 2 * MAX_PIECES * BODIES_PER_PIECE * 64)
-	_sbuf("acc", 3 * MAX_PIECES * BODIES_PER_PIECE * ACC_STRIDE * 4)
+	_sbuf("acc", (3 * MAX_PIECES * BODIES_PER_PIECE * ACC_STRIDE + 64) * 4)
 	_sbuf("pieces", MAX_PIECES * 16)
 	_sbuf("plist", MAX_PIECES * MAX_PIECE_GRAINS * 4)
 	_sbuf("stage", MAX_PIECE_GRAINS * 32)
@@ -136,6 +140,10 @@ func setup(cap: int, world_size: Vector2, materials: Array = SimConst.MATERIALS)
 		_shaders.append(shader)
 		_pipe[k] = rd.compute_pipeline_create(shader)
 		_set[k] = [_make_set(shader, "a", "b"), _make_set(shader, "b", "a")]
+
+
+func _sense_offset() -> int:
+	return 3 * MAX_PIECES * BODIES_PER_PIECE * ACC_STRIDE * 4
 
 
 ## Stiffness from the contact duration: two reference grains (m_eff = m/2)
@@ -247,7 +255,9 @@ static func slot_range(offset: int, n: int) -> PackedInt32Array:
 ## Machine colliders: bodies = 8 floats each, prims = 64 bytes each (see colliders.glsli),
 ## grid = coarse collider grid (Machine.pack_grid) of `dims` cells.
 func set_colliders(bodies: PackedFloat32Array, prims: PackedByteArray, grid: PackedInt32Array, dims: Vector2i,
-		bounds: PackedFloat32Array) -> void:
+		bounds: PackedFloat32Array, sensor_cfg := PackedFloat32Array()) -> void:
+	if sensor_cfg.size() == 16:
+		rd.buffer_update(_buf.acc, _sense_offset() + 48 * 4, 64, sensor_cfg.to_byte_array())
 	assert(bodies.size() <= MAX_BODIES * 8 and prims.size() <= MAX_PRIMS * 64)
 	assert(dims == pgrid_dims, "machine.world must match the solver world")
 	rd.buffer_update(_buf.pgrid, 0, grid.size() * 4, grid.to_byte_array())
@@ -266,6 +276,7 @@ func step(frame_dt: float = SimConst.DT) -> void:
 		rd.buffer_clear(_buf.bin_count, 0, grid.x * grid.y * 4 * 2)
 		_stamp = 1
 	var groups := ceili(float(active_n) / WG)
+	rd.buffer_clear(_buf.acc, _sense_offset(), 32)
 	var cl := rd.compute_list_begin()
 	# Spatial processing order for this frame (count, scan, scatter).
 	var p0 := _push(0.0, 0)
@@ -286,6 +297,14 @@ func step(frame_dt: float = SimConst.DT) -> void:
 	rd.compute_list_end()
 	frames += 1
 	sim_time += frame_dt
+	if not _sense_pending:
+		_sense_pending = true
+		var steps := substeps
+		rd.buffer_get_data_async(_buf.acc, func(data: PackedByteArray) -> void:
+			var f := data.to_float32_array()
+			for k in 4:
+				sensors[k] = Vector2(f[2 * k], f[2 * k + 1]) / steps
+			_sense_pending = false, _sense_offset(), 32)
 
 
 ## State of rigid body b after the last step: (c.x, c.y, angle, alive, v.x, v.y, omega, mass, ...16 floats).

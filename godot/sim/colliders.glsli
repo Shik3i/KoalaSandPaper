@@ -8,6 +8,14 @@ void body_pose(uint b, float t, out vec2 pos, out float ang, out vec2 vel, out f
 	om = v.z;
 	pos = p.xy + v.xy * t;
 	ang = p.z + v.z * t;
+	if (p.w > 0.5) {
+		// Force-limited body (sensor p.w - 1): commanded pose plus its yield.
+		uint s = uint(p.w) - 1u;
+		vec2 axis = vec2(ACC[SENSE_CFG + 4u * s], ACC[SENSE_CFG + 4u * s + 1u]);
+		vec2 y = yield_now(s);
+		pos += axis * y.x;
+		vel += axis * y.y;
+	}
 }
 
 // q is in the body's local frame.

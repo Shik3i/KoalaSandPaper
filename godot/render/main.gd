@@ -123,6 +123,7 @@ func _sim_frame() -> void:
 			_spawn_piece()
 		next_piece += PIECE_PERIOD
 	var c0 := Time.get_ticks_usec()
+	factory.drive(SimConst.DT, t, solver.sensors)
 	factory.update(t)
 	factory.upload(solver)
 	solver.active_n = maxi(pool.high_water, 1)
@@ -213,6 +214,13 @@ func _compose() -> void:
 	view = ParticleView.new()
 	_add(view, "view")
 	view.bind(solver, ppm)
+
+	var flow := FlowArrows.new()
+	flow.factory = factory
+	flow.px_per_m = ppm
+	flow.world_h = Factory.WORLD.y
+	flow.z_index = 15
+	_add(flow, "flow")
 
 	var front := MachineView.new()
 	front.machine = factory

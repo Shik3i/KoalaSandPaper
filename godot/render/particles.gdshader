@@ -37,6 +37,8 @@ void vertex() {
 	// Grains of rigid pieces/chunks are drawn larger and flat (fragment()): they
 	// merge into one solid body instead of a lattice of shaded balls (moiré).
 	if (kind == 4u) radius_px *= 1.5;
+	// Sand a little fuller than its contact radius: heaps read as masses, not dots.
+	else radius_px *= 1.15;
 	if (shadow) {
 		c += vec2(0.45, 0.6) * radius_px;
 		radius_px *= 1.35;

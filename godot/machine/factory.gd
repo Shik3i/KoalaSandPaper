@@ -11,6 +11,8 @@ const S := 0.016  # legacy plan scale (T5 geometry)
 
 const BELT_SPEED := 0.45
 const PRESS_X := 6.0
+## Press force limit in grain weights (a tetromino cracks at ~2000).
+const PRESS_FORCE := 2600.0
 const ROTOR_OMEGA := -0.8
 const OUTLET_HALF := 12.0  # deg, bottom outlet half aperture (35 cm)
 const OUTLET_A0 := 206.8  # side outlet (T5 mixer test geometry)
@@ -19,6 +21,9 @@ const OUTLET_A1 := 220.3
 const Y_A := 5.20
 const Y_FLOOR := 0.90
 const ELEV_SPEED := 0.5
+## Elevator buckets: outward width × depth (m) and spacing along the chain.
+const BUCKET_SIZE := Vector2(0.16, 0.11)
+const BUCKET_PITCH := 0.4
 ## Pusher head (car-piston sized: 32 × 34 cm), sweep period and telescopic stages.
 const PUSHER_HALF := Vector2(0.16, 0.17)
 const PUSHER_PERIOD := 18.0
@@ -47,8 +52,8 @@ var elev_top := Vector2(3.2, 6.25)
 var elev_rs := 0.2
 var floor_x := Vector2(1.5, 10.2)
 var furnace := Rect2(10.0, 0.2, 2.2, 2.2)
-## Station label anchors (world m).
-var stations := {}
+## Station labels (see _init).
+var stations: Array[Dictionary] = []
 ## Map: "factory" (rotor mixer) or "galton" (Galton board with bins and a slide gate).
 var map := "factory"
 ## Galton map: x of the bin centres, bins' bottom/top, gate body.
@@ -71,11 +76,17 @@ func _init(map_name := "factory") -> void:
 		rotor_body = build_bowl(self, bowl_c, bowl_r)
 	_pusher()
 	_furnace()
-	stations = {
-		"01 / FORMEN": Vector2(4.3, 5.75), "02 / PRESSE": Vector2(5.65, 6.6),
-		"03 / MAHLWERK": Vector2(9.4, 4.8), "04 / MISCHEN" if map != "galton" else "04 / GALTONBRETT": Vector2(9.4, 3.0),
-		"05 / SCHIEBER": Vector2(4.6, 1.45), "06 / OFEN": Vector2(10.35, 2.75), "07 / AUFZUG": Vector2(2.6, 3.0),
-	}
+	# Station labels: number, name, what happens there (anchor = label position).
+	stations = [
+		{"n": "01", "name": "FORMEN", "sub": "neue Teile aufs Band", "at": Vector2(4.3, 5.95)},
+		{"n": "02", "name": "PRESSE", "sub": "knackt die Teile", "at": Vector2(6.62, 6.1)},
+		{"n": "03", "name": "MAHLWERK", "sub": "zermahlt zu Sand", "at": Vector2(9.4, 4.8)},
+		{"n": "04", "name": "GALTONBRETT" if map == "galton" else "MISCHER",
+			"sub": "verteilt den Sand" if map == "galton" else "mischt die Farben", "at": Vector2(9.4, 3.0)},
+		{"n": "05", "name": "SCHIEBER", "sub": "halb zurück, halb ins Feuer", "at": Vector2(4.6, 1.75)},
+		{"n": "06", "name": "OFEN", "sub": "verbrennt den Sand", "at": Vector2(10.85, 2.8)},
+		{"n": "07", "name": "AUFZUG", "sub": "zurück nach oben", "at": Vector2(2.75, 3.0)},
+	]
 	update(0.0)
 
 
@@ -132,14 +143,19 @@ func _elevator() -> void:
 	var t := elev_top
 	var rs := elev_rs
 	var l := chain_length(b, t, rs)
-	var n := int(l / 0.7)
+	# Many small buckets (≈ 600 grains each) close together: the pit is emptied in
+	# a steady stream, not in a few big gulps.
+	var n := int(l / BUCKET_PITCH)
+	var w := BUCKET_SIZE.x
+	var d := BUCKET_SIZE.y
+	var th := 0.01
 	for k in n:
 		var body := add_body(Vector2.ZERO, 0.0, "bucket")
 		chain_fixed(body, b, t, rs, -ELEV_SPEED, k * l / n)
 		# Local frame: +y = travel (mouth), -x = outside of the loop.
-		add_prim(body, BOX, [0.13, 0.012, 0.006], Vector2(-0.13, -0.21), 0.0, 1, 0, 0.0, "bucket")
-		add_prim(body, BOX, [0.012, 0.11, 0.006], Vector2(-0.012, -0.11), 0.0, 1, 0, 0.0, "bucket")
-		add_prim(body, BOX, [0.012, 0.11, 0.006], Vector2(-0.248, -0.11), 0.0, 1, 0, 0.0, "bucket")
+		add_prim(body, BOX, [w * 0.5, th, 0.005], Vector2(-w * 0.5, -d), 0.0, 1, 0, 0.0, "bucket")
+		add_prim(body, BOX, [th, d * 0.5, 0.005], Vector2(-th, -d * 0.5), 0.0, 1, 0, 0.0, "bucket")
+		add_prim(body, BOX, [th, d * 0.5, 0.005], Vector2(-w + th, -d * 0.5), 0.0, 1, 0, 0.0, "bucket")
 		buckets.append(body)
 	for c in [b, t]:
 		var sp := add_body(c, 0.0, "sprocket")
@@ -148,8 +164,8 @@ func _elevator() -> void:
 	# Pit: arc under the boot sprocket from the -n side (156°) round to the +n side (336°).
 	var u := (t - b).normalized()
 	var nrm := Vector2(u.y, -u.x)
-	# Bucket corner radius around the sprocket: sqrt((rs + depth)² + length²), + 7.5 cm (5 cm clear of the 2.5 cm wall).
-	var pit := Vector2(rs + 0.26, 0.222).length() + 0.075
+	# Bucket corner radius around the sprocket: |(rs + width, depth + wall)|, + 7.5 cm (5 cm clear of the 2.5 cm wall).
+	var pit := Vector2(rs + w, d + th).length() + 0.075
 	add_arc(b, pit, 0.025, (-nrm).angle(), nrm.angle() + TAU)
 	# Feed plate (43°) from the floor end down into the pit, outside the bucket sweep.
 	var pit_end := b + nrm * pit
@@ -163,10 +179,12 @@ func _elevator() -> void:
 	add_segment(left0, left0 + up * ((t - b).length() + 0.25), 0.025)
 	var right0 := b + nrm * pit
 	var s_lo := (1.6 - right0.y) / up.y
-	var s_hi := (5.3 - right0.y) / up.y
+	var s_hi := (5.45 - right0.y) / up.y
 	add_segment(right0 + up * s_lo, right0 + up * s_hi, 0.025)
-	# Head chute onto belt A (37°), ≥ 5 cm clear of the return-strand buckets and cleats.
-	add_segment(Vector2(3.62, 5.74), Vector2(4.15, 5.33), 0.02)
+	# Head chute onto belt A (37°), reaching back over the casing wall so the
+	# discharge of the small buckets cannot fall between them; clear of the
+	# return-strand buckets and the cleats (clearance audit).
+	add_segment(Vector2(3.5, 5.83), Vector2(4.15, 5.33), 0.02)
 	# Floor drain: spill that misses every machine is recycled (counted on sink 3).
 	add_sink(Vector2(0.0, -0.1), Vector2(WORLD.x, 0.12), 3)
 
@@ -191,11 +209,14 @@ func conveyor(x0: float, x1: float, top: float, speed: float, spacing := 0.5) ->
 
 
 func _press() -> void:
-	# Head bottom travels from 5.87 down to 5.37 (17 cm above the belt): flat
-	# pieces pass, tall ones are crushed and shatter.
+	# Hydraulic press with a pressure relief valve: the head comes down (to 17 cm
+	# above the belt at most) until the resistance reaches PRESS_FORCE, enough to
+	# crack a whole piece, then rises again. Rubble that holds is left for the
+	# shredder; a kinematic (infinitely strong) press pulverised every fragment.
 	press_body = add_body(Vector2(PRESS_X, 5.92), 0.0, "press")
-	piston(press_body, Vector2(0.0, -1.0), 0.50, 3.3)
-	add_prim(press_body, BOX, [0.26, 0.05, 0.01], Vector2.ZERO, 0.0, 1, 0, 0.0, "piston")
+	hydraulic(press_body, Vector2(0.0, -1.0), 0.50, 3.3, 0.32, 0.5, PRESS_FORCE * SimConst.mass(SimConst.SAND_DENSITY) * SimConst.G, 0)
+	var pk := add_prim(press_body, BOX, [0.26, 0.05, 0.01], Vector2.ZERO, 0.0, 1, FLAG_SENSE, 0.0, "piston")
+	prims[pk].sink_id = 0
 	add_prim(press_body, BOX, [0.035, 0.3, 0.0], Vector2(0.0, 0.35), 0.0, 1, FLAG_VISUAL, 0.0, "rod")
 
 
@@ -357,6 +378,23 @@ func prefill(n: int, rng: RandomNumberGenerator) -> ParticleSet:
 			y += dy
 			row += 1
 	return s
+
+
+## Material flow for the arrow overlay: polylines (world m) in flow direction.
+func flow_paths() -> Array[PackedVector2Array]:
+	var u := (elev_top - elev_bottom).normalized()
+	var nrm := Vector2(u.y, -u.x)
+	var side := elev_bottom - nrm * 0.62
+	var out: Array[PackedVector2Array] = [
+		PackedVector2Array([side + u * 0.6, side + u * ((elev_top - elev_bottom).length() - 0.3)]),
+		PackedVector2Array([Vector2(3.55, 6.0), Vector2(4.25, 5.47)]),
+		PackedVector2Array([Vector2(4.3, 4.98), Vector2(7.55, 4.98)]),
+		PackedVector2Array([Vector2(8.4, 4.32), Vector2(8.4, 3.95)]),
+		PackedVector2Array([bowl_c + Vector2(0.0, -bowl_r - 0.08), bowl_c + Vector2(0.0, -bowl_r - 0.33)]),
+		PackedVector2Array([Vector2(bowl_c.x - 0.35, 1.52), Vector2(floor_x.x + 0.4, 1.52)]),
+		PackedVector2Array([Vector2(bowl_c.x + 0.35, 1.52), Vector2(floor_x.y - 0.1, 1.52)]),
+	]
+	return out
 
 
 ## Machine poses at t, then the ram rod collider stretched from the head's back

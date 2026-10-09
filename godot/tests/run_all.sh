@@ -10,7 +10,7 @@ if [ -z "$SKIP_AUDIT" ]; then
 		caffeinate -i "$G" --headless --path . --script res://tools/clearance.gd -- map=$m 2>&1 | grep '^{' >> "$OUT"
 	done
 fi
-for t in t1_free_fall t2_repose t3_incline t4_silo t5_mixing t6_shredding t7_conveyor t_pusher q_sand; do
+for t in t1_free_fall t2_repose t3_incline t4_silo t5_mixing t6_shredding t7_conveyor t_pusher q_sand q_press; do
 	extra=""
 	[ "$t" = t1_free_fall ] && extra="sub=80"
 	QUIT_AFTER=20000 tools/run.sh res://tests/runner.tscn t=$t $extra | grep '^{' | tail -1 >> "$OUT"

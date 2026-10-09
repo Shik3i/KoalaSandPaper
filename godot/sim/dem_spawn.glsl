@@ -19,5 +19,6 @@ void main() {
 	INFO[i] = floatBitsToUint(b.z);
 	COLOR[i] = floatBitsToUint(b.w);
 	BODY_OF[i] = piece * NSUB;
+	VN[i] = vec2(0.0);  // chip counter
 	RANK[i] = CELL_NONE;
 }

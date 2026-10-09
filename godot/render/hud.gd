@@ -26,11 +26,12 @@ func setup(f: Factory, px_per_m: float) -> void:
 	add_child(root)
 	_label(root, "KOALASANDPAPER", Vector2(6.75, 6.64), 0.16, INK)
 	_label(root, "KINETIC STUDY 001", Vector2(6.75, 6.42), 0.09, DIM)
-	var lines := Lines.new()
-	lines.hud = self
-	root.add_child(lines)
-	for k in f.stations:
-		_label(root, k, f.stations[k], 0.095, INK)
+	var badges := Badges.new()
+	badges.hud = self
+	root.add_child(badges)
+	for st in f.stations:
+		_label(root, st.name, st.at + Vector2(0.17, 0.0), 0.105, INK)
+		_label(root, st.sub, st.at + Vector2(0.17, -0.13), 0.072, DIM)
 	_burned = _label(root, "", Vector2(9.55, 6.62), 0.095, ACCENT)
 	_active = _label(root, "", Vector2(9.55, 6.44), 0.095, INK)
 	_lift = _label(root, "", Vector2(9.55, 6.26), 0.095, DIM)
@@ -79,12 +80,18 @@ static func _group(n: int) -> String:
 	return s + out
 
 
-class Lines:
+class Badges:
 	extends Control
-	## Thin leader ticks under each station label.
+	## Station number in a ring left of each label.
 	var hud: Hud
 
 	func _draw() -> void:
-		for k in hud.factory.stations:
-			var p: Vector2 = hud.to_px(hud.factory.stations[k]) + Vector2(0, 0.025 * hud.ppm)
-			draw_line(p, p + Vector2(0.55 * hud.ppm, 0), Hud.ACCENT.darkened(0.3), maxf(1.0, 0.006 * hud.ppm))
+		var font := ThemeDB.fallback_font
+		var r := 0.075 * hud.ppm
+		for st in hud.factory.stations:
+			var c: Vector2 = hud.to_px(st.at + Vector2(0.0, 0.02))
+			draw_circle(c, r, Color(Hud.ACCENT, 0.16))
+			draw_arc(c, r, 0.0, TAU, 32, Hud.ACCENT, maxf(1.0, 0.008 * hud.ppm), true)
+			var fs := int(maxf(8.0, 0.07 * hud.ppm))
+			var w := font.get_string_size(st.n, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x
+			draw_string(font, c + Vector2(-w * 0.5, fs * 0.35), st.n, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, Hud.ACCENT)

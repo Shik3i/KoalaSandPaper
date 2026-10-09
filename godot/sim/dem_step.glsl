@@ -18,6 +18,11 @@
 #include "colliders.glsli"
 layout(local_size_x = WG) in;
 
+// Chipping: a point load above CHIP_FRAC x crush_f (300 grain weights) for
+// CHIP_STEPS. Distributed loads (a press face) break the body first (dem_rigid).
+#define CHIP_FRAC 1.0
+#define CHIP_STEPS 2.0
+
 uint h_base = 0u;
 uint n_new = 0u;
 
@@ -92,6 +97,7 @@ vec2 contact_force(uint key, vec2 n, float pen, vec2 vrel, vec2 v_other, float m
 void main() {
 	uint t = gl_GlobalInvocationID.x;
 	if (t >= pc.n || pc.guard < -1e30) return;
+	if (t == 0u) yield_store();
 	uvec2 bdim = uvec2((pc.grid_w + 7u) / 8u, (pc.grid_h + 7u) / 8u);
 	if (t >= BLOCK_CURSOR[bdim.x * bdim.y]) return;  // live grains this frame
 	uint i = ORDER[t];
@@ -207,7 +213,18 @@ void main() {
 				vs = vec2(0.0);
 				key = KEY_PRIM | (0xfff0u + w);
 			}
-			f += contact_force(key, n, pen, vi - vs, vs, md_i, mi.z, mu.x, mu.y, 1.0);
+			vec2 fc = contact_force(key, n, pen, vi - vs, vs, md_i, mi.z, mu.x, mu.y, 1.0);
+			f += fc;
+			if (gi <= pcnt && (prim_flags(PGRID[pcell + gi]) & 16u) != 0u) {
+				// Force sensor (e.g. the press's pressure relief, read on the CPU).
+				uint sid = (PRIMS[PGRID[pcell + gi]].head.w >> 8u) & 3u;
+				uint so = SENSE_BASE + 2u * sid;
+				atomicAdd(ACC[so], fc.x);
+				atomicAdd(ACC[so + 1u], fc.y);
+				uint sp = SENSE_STEP + 8u * (pc.stamp % 3u) + 2u * sid;
+				atomicAdd(ACC[sp], fc.x);
+				atomicAdd(ACC[sp + 1u], fc.y);
+			}
 			max_pen = max(max_pen, pen / ri);
 			n_contacts++;
 		}
@@ -259,9 +276,22 @@ void main() {
 				}
 			}
 		}
+		// Chipping: a grain that carries a concentrated load (a tooth, a press
+		// edge, a corner the piece rests on) for CHIP_STEPS crumbles off as sand;
+		// dem_rigid then updates the body's mass and shape. Brittle blocks wear
+		// at contact points long before they split.
+		float cc = VN[i].x;
+		cc = length(ft) > CHIP_FRAC * pc.crush_f ? cc + 1.0 : max(cc - 0.5, 0.0);
+		if (cc >= CHIP_STEPS) {
+			info = (info & ~0xffffu) | (KIND_GRAIN << 8u);
+			INFO[i] = info;
+			kind = KIND_GRAIN;
+			cc = 0.0;
+		}
+		VN[i] = vec2(cc, length(ft));  // chip counter, last load (dem_rigid finds the contact)
 		XV[i] = vec4(xi, vi);
 		bin_insert(i, info, xi, vi);
-		if (last) imageStore(RENDER_IMG, texel, vec4(xi, float(COLOR[i] & 0xffffffu), float(render_w(kind, info, heat_of(info), 0u))));
+		if (last) imageStore(RENDER_IMG, texel, vec4(xi, float(COLOR[i] & 0xffffffu), float(render_w(kind, info, heat_of(info), n_contacts))));
 		return;
 	}
 

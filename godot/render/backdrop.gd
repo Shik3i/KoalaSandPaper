@@ -20,8 +20,8 @@ func _draw() -> void:
 	# Elevator casing: a band along the incline behind the chain.
 	var u := (f.elev_top - f.elev_bottom).normalized()
 	var n := Vector2(u.y, -u.x)
-	# Behind the casing walls (pit radius 0.58 m from the chain centre line).
-	var w := 0.62
+	# Behind the casing walls (pit radius from the chain centre line + margin).
+	var w := Vector2(f.elev_rs + Factory.BUCKET_SIZE.x, Factory.BUCKET_SIZE.y + 0.01).length() + 0.12
 	var a := f.elev_bottom - u * 0.62
 	var b := f.elev_top + u * 0.62
 	_poly([a - n * w, a + n * w, b + n * w, b - n * w], PANEL)
