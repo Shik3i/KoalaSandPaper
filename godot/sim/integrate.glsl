@@ -27,6 +27,7 @@ void main() {
 		vec2 s = STAB[i];
 		x += s;
 		X[i] = x;
+		STAB[i] = vec2(0.0);
 		d = (V[i] + pc.gravity * pc.h) * pc.h;
 	}
 	float dl = length(d);
@@ -37,7 +38,9 @@ void main() {
 		STATS[ST_CLAMP_POS + 1] = floatBitsToUint(x.y);
 	}
 	D_IN[i] = d;
+	D_OUT[i] = d;  // default if the contact pass never sees this grain (cell overflow)
 	XD[i] = vec4(x, d);
+	if (kind == KIND_RIGID) FRIC[i] = vec4(0.0);
 	if (kind == KIND_SPARK) {
 		CELL_OF[par() * pc.cap + i] = CELL_NONE;
 		return;

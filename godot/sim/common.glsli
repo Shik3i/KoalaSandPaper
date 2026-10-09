@@ -4,7 +4,7 @@
 // kernel reads during this substep (no clear/read race).
 
 #define WG 256
-#define CELL_CAP 8u
+#define CELL_CAP 4u
 #define TEX_W 1024u
 #define MAX_BONDS 6u
 

@@ -4,7 +4,7 @@ extends RefCounted
 ## except via explicit test/stat readbacks.
 
 const TEX_W := 1024
-const CELL_CAP := 8
+const CELL_CAP := 4
 const MAX_BONDS := 6
 const WG := 256
 const MAX_BODIES := 256
@@ -16,6 +16,8 @@ const STAT_KEYS := ["clamp", "overflow", "nan", "oob", "max_pen_r", "max_speed",
 
 var rd: RenderingDevice
 var capacity := 0
+## Piece slots ever used (rigid kernels dispatch over [0, pieces_used)).
+var pieces_used := 0
 ## Highest used slot + 1: kernels are dispatched over [0, active_n).
 var active_n := 0
 var world := Vector2.ZERO
@@ -170,6 +172,7 @@ func spawn_piece(piece: int, offset: int, s: ParticleSet, origin: Vector2, vel: 
 	body[8] = c.x; body[9] = c.y; body[10] = 0.0; body[11] = 1.0
 	body[12] = c0.x; body[13] = c0.y
 	rd.buffer_update(_buf.rb, piece * BODIES_PER_PIECE * 64, body.size() * 4, body.to_byte_array())
+	pieces_used = maxi(pieces_used, piece + 1)
 	var pd := PackedInt32Array([offset, n, 1, 0])
 	rd.buffer_update(_buf.pieces, piece * 16, 16, pd.to_byte_array())
 
@@ -199,13 +202,15 @@ func step(frame_dt: float = SimConst.DT) -> void:
 		_substep = (_substep + 1) % 240
 		var flags := (1 if last else 0) | nostab | (4 * _parity) | (_substep << 8)
 		var p := _push(h, t, flags)
-		_dispatch(cl, "rigid_predict", 0, p, ceili(float(MAX_PIECES * BODIES_PER_PIECE) / WG))
+		if pieces_used > 0:
+			_dispatch(cl, "rigid_predict", 0, p, ceili(float(pieces_used * BODIES_PER_PIECE) / WG))
 		_dispatch(cl, "integrate", 0, p, groups)
 		var cur := 0
 		for it in iterations:
 			_dispatch(cl, "contacts", cur, _push(h, t, flags | 1) if last and it == iterations - 1 else _push(h, t, flags & ~1), groups)
 			cur = 1 - cur
-		_dispatch(cl, "rigid_solve", cur, p, MAX_PIECES)
+		if pieces_used > 0:
+			_dispatch(cl, "rigid_solve", cur, p, pieces_used)
 		_dispatch(cl, "finalize", cur, p, groups)
 		_dispatch(cl, "velocity", cur, p, groups)
 	rd.compute_list_end()
@@ -323,7 +328,13 @@ func _make_set(shader: RID, p_in: String, p_out: String) -> RID:
 	return rd.uniform_set_create(us, shader, 0)
 
 
+## Profiling aid: kernels listed here are not dispatched (results become wrong).
+var skip_kernels: Array = []
+
+
 func _dispatch(cl: int, kernel: String, variant: int, pc: PackedByteArray, groups: int) -> void:
+	if kernel in skip_kernels:
+		return
 	rd.compute_list_bind_compute_pipeline(cl, _pipes[kernel])
 	rd.compute_list_bind_uniform_set(cl, _sets[kernel][variant], 0)
 	rd.compute_list_set_push_constant(cl, pc, pc.size())
@@ -354,7 +365,7 @@ func _push(h: float, t_sub: float, flags: int) -> PackedByteArray:
 	b.encode_float(68, sleep * radius)
 	b.encode_float(72, r_max)
 	b.encode_float(76, 1.0 / Machine.PCELL)
-	b.encode_u32(80, MAX_PIECES)
+	b.encode_u32(80, pieces_used)
 	b.encode_float(84, crush * radius)
 	b.encode_float(88, kerf)
 	b.encode_u32(92, pgrid_dims.x | (pgrid_dims.y << 16))

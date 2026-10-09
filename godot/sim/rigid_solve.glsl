@@ -10,7 +10,9 @@
 //    rollers, pressed) for several substeps, the body shatters into its bond net.
 // Requires iterations == 1 (D_OUT = binding 1, D_IN = binding 2 in this variant).
 #include "common.glsli"
-layout(local_size_x = WG) in;
+// Small workgroups: 4 KB shared memory, cheap launch for idle piece slots.
+#define RWG 64u
+layout(local_size_x = RWG) in;
 
 #define D_AFTER D_IN
 #define D_BEFORE D_OUT
@@ -22,7 +24,7 @@ shared uint s_left[NSUB];
 shared uint s_right[NSUB];
 shared int s_newsub[NSUB];
 shared uint s_nsub;
-shared float s_red[WG * 16];
+shared float s_red[RWG * 16u];
 shared uint s_res;
 
 float side_of(vec2 p) {
@@ -58,7 +60,7 @@ void main() {
 
 	// 1. Laser classification.
 	if (laser) {
-		for (uint i = pd.x + tid; i < pd.x + pd.y; i += WG) {
+		for (uint i = pd.x + tid; i < pd.x + pd.y; i += RWG) {
 			if (kind_of(INFO[i]) != KIND_RIGID) continue;
 			uint k = BODY_OF[i] - base;
 			vec2 p = X[i] + D_AFTER[i];
@@ -79,7 +81,7 @@ void main() {
 			PIECES[piece].z = s_nsub;
 		}
 		SYNC();
-		for (uint i = pd.x + tid; i < pd.x + pd.y; i += WG) {
+		for (uint i = pd.x + tid; i < pd.x + pd.y; i += RWG) {
 			uint info = INFO[i];
 			if (kind_of(info) != KIND_RIGID) continue;
 			uint k = BODY_OF[i] - base;
@@ -108,7 +110,7 @@ void main() {
 		float cnt = 0.0, nc = 0.0, rr = 0.0, tq = 0.0, nf = 0.0, rxd = 0.0, r2 = 0.0;
 		vec2 sr = vec2(0.0), sp = vec2(0.0), srr = vec2(0.0), sdl = vec2(0.0);
 		vec4 fr = vec4(0.0);
-		for (uint i = pd.x + tid; i < pd.x + pd.y; i += WG) {
+		for (uint i = pd.x + tid; i < pd.x + pd.y; i += RWG) {
 			if (kind_of(INFO[i]) != KIND_RIGID || BODY_OF[i] != b) continue;
 			vec2 r0 = REST[i] - c0;
 			cnt += 1.0;
@@ -117,7 +119,7 @@ void main() {
 		}
 		s_red[tid * 16u] = cnt; s_red[tid * 16u + 1u] = sr.x; s_red[tid * 16u + 2u] = sr.y; s_red[tid * 16u + 3u] = rr;
 		SYNC();
-		for (uint w = WG / 2u; w > 0u; w >>= 1u) {
+		for (uint w = RWG / 2u; w > 0u; w >>= 1u) {
 			if (tid < w) for (uint q = 0u; q < 4u; q++) s_red[tid * 16u + q] += s_red[(tid + w) * 16u + q];
 			SYNC();
 		}
@@ -131,7 +133,7 @@ void main() {
 		float M = N * m;
 		float I = max(m * (RR - N * dot(c0n, c0n)), 1e-9);
 		// Impulses (inertia about the current COM, lever arms about it too).
-		for (uint i = pd.x + tid; i < pd.x + pd.y; i += WG) {
+		for (uint i = pd.x + tid; i < pd.x + pd.y; i += RWG) {
 			if (kind_of(INFO[i]) != KIND_RIGID || BODY_OF[i] != b) continue;
 			vec4 f = FRIC[i];
 			if (f.z > 0.0) {
@@ -159,7 +161,7 @@ void main() {
 		s_red[o + 9u] = srr.x; s_red[o + 10u] = srr.y; s_red[o + 11u] = sdl.x; s_red[o + 12u] = sdl.y;
 		s_red[o + 13u] = rxd; s_red[o + 14u] = r2;
 		SYNC();
-		for (uint w = WG / 2u; w > 0u; w >>= 1u) {
+		for (uint w = RWG / 2u; w > 0u; w >>= 1u) {
 			if (tid < w) for (uint q = 0u; q < 15u; q++) s_red[tid * 16u + q] += s_red[(tid + w) * 16u + q];
 			SYNC();
 		}
@@ -190,7 +192,7 @@ void main() {
 			if (tl > 0.0) dcf = tl < FS / NF ? -t : -t * min((FK / NF) / tl, 1.0);
 		}
 		// 3. Crush residual: what the rigid response leaves unsatisfied.
-		for (uint i = pd.x + tid; i < pd.x + pd.y; i += WG) {
+		for (uint i = pd.x + tid; i < pd.x + pd.y; i += RWG) {
 			if (kind_of(INFO[i]) != KIND_RIGID || BODY_OF[i] != b) continue;
 			vec2 dl = D_AFTER[i] - D_BEFORE[i];
 			if (dot(dl, dl) < 1e-24) continue;
@@ -220,7 +222,7 @@ void main() {
 		SYNC();
 		if (RB[4u * b].w < 0.5) {
 			// Shatter: grains continue as the piece's bond network.
-			for (uint i = pd.x + tid; i < pd.x + pd.y; i += WG) {
+			for (uint i = pd.x + tid; i < pd.x + pd.y; i += RWG) {
 				uint info = INFO[i];
 				if (kind_of(info) == KIND_RIGID && BODY_OF[i] == b) INFO[i] = (info & ~0xff00u) | (KIND_BONDED << 8u);
 			}

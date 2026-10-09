@@ -78,6 +78,7 @@ void main() {
 	INFO[i] = info;
 	X[i] = p;
 	VOLD[i] = V[i];
+	V[i] = v;  // default if the velocity pass never sees this grain
 	XV[i] = vec4(p, v);
 	if (last) {
 		// w packs kind (3 bit) | radius code (8 bit) | heat (8 bit): exact in float.

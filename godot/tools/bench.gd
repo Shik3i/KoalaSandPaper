@@ -24,6 +24,8 @@ func _ready() -> void:
 	solver.iterations = args.it
 	solver.stack_k = args.get("stack", SimConst.STACK_K)
 	solver.setup(args.n, world)
+	if args.has("skip"):
+		solver.skip_kernels = str(args.skip).split("+")
 	var cols := int(wc * 0.78)
 	solver.write_set(0, Spawn.block(args.n, Vector2(wc * 0.11, wc * 9 / 16 * 0.38) * 2.0 * r, cols, 1))
 	var view := ParticleView.new()
@@ -36,7 +38,8 @@ func _process(_d: float) -> void:
 	if last_us > 0 and solver.frames > args.warm:
 		times.append((now - last_us) / 1000.0)
 	last_us = now
-	solver.step()
+	for k in int(args.get("spf", 1)):
+		solver.step()
 	if args.has("shot_at") and solver.frames == args.shot_at:
 		_shot(args.shot.replace(".png", "_f%d.png" % solver.frames))
 	if times.size() >= args.frames:
@@ -65,7 +68,7 @@ func _report() -> void:
 	mean /= times.size()
 	var out := {
 		"test": "T9", "n": args.n, "sub": args.sub, "it": args.it,
-		"fps": snappedf(1000.0 / mean, 0.1), "frame_ms_p50": snappedf(times[times.size() / 2], 0.01),
+		"fps": snappedf(1000.0 / mean, 0.1), "spf": args.get("spf", 1), "ms_per_sim_frame": snappedf(times[times.size() / 2] / float(args.get("spf", 1)), 0.01), "frame_ms_p50": snappedf(times[times.size() / 2], 0.01),
 		"frame_ms_p95": snappedf(times[int(times.size() * 0.95)], 0.01),
 		"res": "%dx%d" % [get_viewport_rect().size.x, get_viewport_rect().size.y],
 		"device": solver.rd.get_device_name(), "stats": st,
