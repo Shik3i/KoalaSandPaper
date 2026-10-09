@@ -20,6 +20,7 @@ var next_piece := 0.5
 var spawned := 0
 var piece_slot := 0
 var prefill_n := 0
+var _trace_t := 0
 var cpu_machine_us := 0
 var cpu_step_us := 0
 var t0 := 0
@@ -88,6 +89,10 @@ func _process(_d: float) -> void:
 		hud.request(solver, spawned + prefill_n)
 	if args.has("shots") and str(solver.frames) in args.shots.split(","):
 		_shot(args.shot.replace(".png", "_f%d.png" % solver.frames))
+	if args.has("trace") and solver.frames % 200 == 0:
+		var now := Time.get_ticks_msec()
+		print("{\"trace\": %d, \"ms_per_frame\": %.2f, \"pieces\": %d}" % [solver.frames, (now - _trace_t) / 200.0, solver.pieces_used])
+		_trace_t = now
 	if args.has("frames") and solver.frames >= int(args.frames):
 		_report()
 
