@@ -78,7 +78,7 @@ func _ready() -> void:
 
 
 func _visible(p: Dictionary) -> bool:
-	return not (p.flags & (Machine.FLAG_SINK | Machine.FLAG_HEAT)) and p.style != "drum" and p.style != "rod"
+	return not (p.flags & (Machine.FLAG_SINK | Machine.FLAG_HEAT)) and not p.style in ["drum", "rod", "rodcol"]
 
 
 func _process(_d: float) -> void:
@@ -246,7 +246,8 @@ func _box_world(p: Dictionary, xf: Transform2D, inset := Vector2.ZERO) -> Packed
 
 ## Horizontal cylinder: dark underside, bright specular band above the axis.
 func _chrome_box(p: Dictionary, xf: Transform2D, base: Color) -> void:
-	var sh: Array = p.shape
+	# draw_hh: drawn half height when it differs from the collider (telescopic stages).
+	var sh: Array = [p.shape[0], p.get("draw_hh", p.shape[1]), p.shape[2]]
 	var lxf := xf * Transform2D(p.angle, p.offset)
 	var bands := [[-1.0, base.darkened(0.55)], [-0.35, base.darkened(0.15)], [0.25, base.lightened(0.55)],
 		[0.5, base.lightened(0.25)], [1.0, base.darkened(0.25)]]
@@ -258,16 +259,22 @@ func _chrome_box(p: Dictionary, xf: Transform2D, base: Color) -> void:
 			pts.append(to_px(lxf * q))
 		_ci.draw_polygon(pts, PackedColorArray([bands[k][1], bands[k][1], bands[k + 1][1], bands[k + 1][1]]))
 	var o := PackedVector2Array()
-	for w in _box_world(p, xf):
-		o.append(to_px(w))
+	for q in [Vector2(-sh[0], -sh[1]), Vector2(sh[0], -sh[1]), Vector2(sh[0], sh[1]), Vector2(-sh[0], sh[1])]:
+		o.append(to_px(lxf * q))
 	o.append(o[0])
 	_ci.draw_polyline(o, OUTLINE, maxf(1.0, 0.004 * px_per_m), true)
+	if p.style == "stage":
+		# Gland collar at the stage's mouth end (its right end).
+		var c0 := PackedVector2Array()
+		for q in [Vector2(sh[0] - 0.035, -sh[1] - 0.006), Vector2(sh[0], -sh[1] - 0.006), Vector2(sh[0], sh[1] + 0.006), Vector2(sh[0] - 0.035, sh[1] + 0.006)]:
+			c0.append(to_px(lxf * q))
+		_ci.draw_colored_polygon(c0, base.darkened(0.35))
 
 
 ## Hydraulic barrel: heavy dark tube with a gland flange at the mouth and bolt rings.
 func _barrel(p: Dictionary, xf: Transform2D) -> void:
 	_chrome_box(p, xf, Color("#5d6d70"))
-	var sh: Array = p.shape
+	var sh: Array = [p.shape[0], p.get("draw_hh", p.shape[1])]
 	var lxf := xf * Transform2D(p.angle, p.offset)
 	var flange := Color("#3e4b4f")
 	for fx in [-sh[0] + 0.03, sh[0] - 0.05]:

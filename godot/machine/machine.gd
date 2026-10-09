@@ -415,6 +415,14 @@ func sdf(p: Vector2, static_only := false) -> float:
 	return best
 
 
+## Changes prim k's shape (4 floats) in place, also in the packed upload bytes.
+func set_prim_shape(k: int, shape: Array) -> void:
+	prims[k].shape = shape + [0.0, 0.0, 0.0, 0.0].slice(shape.size())
+	if _prim_bytes.size() == prims.size() * 64:
+		for q in 4:
+			_prim_bytes.encode_float(k * 64 + 32 + q * 4, prims[k].shape[q])
+
+
 ## Signed distance from world point p to one prim at the bodies' current poses.
 func prim_distance(pr: Dictionary, p: Vector2) -> float:
 	var q: Vector2 = body_xform(pr.body).affine_inverse() * p
@@ -447,7 +455,7 @@ func prim_distance(pr: Dictionary, p: Vector2) -> float:
 ## belt, telescopic stages in their barrel and in each other, a ram head on its stages.
 func touching(duration: float, steps: int) -> Dictionary:
 	var worst := {}
-	var allowed := [["cleat", ""], ["stage", "stage"], ["stage", "pusher"], ["stage", ""]]
+	var allowed := [["cleat", ""], ["rod", "pusher"], ["rod", ""]]
 	for step in steps:
 		update(duration * step / steps)
 		var boxes: Array[Rect2] = []

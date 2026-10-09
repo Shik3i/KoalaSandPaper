@@ -23,6 +23,8 @@ const ELEV_SPEED := 0.5
 const PUSHER_HALF := Vector2(0.16, 0.17)
 const PUSHER_PERIOD := 18.0
 const STAGES := 6
+## Collision half height of the ram's rod (all stages and the barrel, flush).
+const ROD_HALF := 0.095
 
 var belt_top := Y_A
 var spawn_at := Vector2(4.5, Y_A + 0.08)
@@ -34,6 +36,8 @@ var pusher_body := 0
 var stages: Array[int] = []
 var stage_len := 1.0
 var barrel := Rect2()
+var rod_prim := -1
+var rod_anchor := 0.0
 var rollers: Array[int] = []
 var buckets: Array[int] = []
 # Leaning ~24° right: the empty return strand moves out from under the head, so
@@ -80,29 +84,35 @@ func _init(map_name := "factory") -> void:
 ## (bell) profile, and a slide gate under the bins that opens every few seconds
 ## and drops the whole distribution onto the floor for the ram.
 func _galton() -> void:
-	var top := Vector2(bowl_c.x, 3.18)
 	var dx := 0.09
 	var dy := dx * sqrt(3.0) * 0.5
 	var rows := 12
-	for r in rows:
-		for k in r + 1:
-			var p := top + Vector2((k - r * 0.5) * dx, -r * dy)
-			add_prim(0, CIRCLE, [0.017], p, 0.0, 1, 0, 0.0, "peg")
-	# Funnel walls along the triangle's flanks keep the stream on the board.
-	var wing := Vector2(0.5 * dx * rows + 0.07, -dy * rows)
-	add_segment(top + Vector2(-0.12, 0.12), top + Vector2(-wing.x, wing.y), 0.015)
-	add_segment(top + Vector2(0.12, 0.12), top + Vector2(wing.x, wing.y), 0.015)
-	# Bins: dividers under the gaps of the last peg row, down to the gate.
-	var y_bot := 1.48
-	var y_top := top.y - dy * rows - 0.03
 	var n_bins := rows + 2
-	var x0 := top.x - (n_bins - 1) * 0.5 * dx
+	var cx := bowl_c.x
+	# Throat: the shredder outlet narrows to 10 cm (10 grains: 6 would arch and
+	# jam, see T4), so every grain enters the board near the same point.
+	add_segment(Vector2(cx - 0.15, 3.3), Vector2(cx - 0.05, 3.21), 0.012)
+	add_segment(Vector2(cx + 0.15, 3.3), Vector2(cx + 0.05, 3.21), 0.012)
+	# Pegs: a full-width staggered field (not a triangle), so grains keep bouncing
+	# at every row and never slide down a side wall into the outer bins.
+	var top := 3.14
+	for r in rows:
+		var cols := n_bins if r % 2 == 0 else n_bins - 1
+		for k in cols:
+			var x := cx + (k - (cols - 1) * 0.5) * dx
+			add_prim(0, CIRCLE, [0.017], Vector2(x, top - r * dy), 0.0, 1, 0, 0.0, "peg")
+	var y_bot := 1.48
+	var y_top := top - rows * dy + 0.02
+	var x0 := cx - (n_bins - 1) * 0.5 * dx
+	# Side walls of the board and bin dividers (dividers end just under the last row).
+	add_segment(Vector2(x0 - 0.5 * dx, y_bot + 0.004), Vector2(x0 - 0.5 * dx, top + 0.06), 0.012)
+	add_segment(Vector2(x0 + (n_bins - 0.5) * dx, y_bot + 0.004), Vector2(x0 + (n_bins - 0.5) * dx, top + 0.06), 0.012)
 	bin_x.clear()
-	for k in n_bins + 1:
-		var x := x0 + (k - 0.5) * dx
-		add_segment(Vector2(x, y_bot + 0.004), Vector2(x, y_top if k > 0 and k < n_bins else top.y - dy * (rows - 1)), 0.006)
-		if k < n_bins:
-			bin_x.append(x0 + k * dx)
+	for k in n_bins:
+		bin_x.append(x0 + k * dx)
+		if k > 0:
+			var x := x0 + (k - 0.5) * dx
+			add_segment(Vector2(x, y_bot + 0.004), Vector2(x, y_top), 0.006)
 	bins = Rect2(x0 - 0.5 * dx, y_bot, n_bins * dx, y_top - y_bot)
 	# Slide gate: a plate under the bins (top face at y_bot, a wiper seal under the
 	# dividers) that slides left out from under them.
@@ -270,10 +280,14 @@ func _pusher() -> void:
 	piston_swept(pusher_body, Vector2(-1.0, 0.0), stroke, PUSHER_PERIOD, _split_modulation(outlet))
 	# Sharp edges (2 mm): a rounded sole would wedge grains into the floor and pop them out.
 	add_prim(pusher_body, BOX, [half.x, half.y, 0.002], Vector2.ZERO, 0.0, 1, 0, 0.0, "piston_head")
-	# Barrel (static) from the retracted head to the furnace wall.
+	# Barrel (static) from the retracted head to the furnace wall, flush with the
+	# rod (ROD_HALF). The six stages are drawn only: nested colliders would stack
+	# two springs where stages overlap and flick grains up at every joint. One rod
+	# collider spans head to barrel, its length updated every frame (update()).
 	var a := home.x + half.x + 0.04
-	barrel = Rect2(a, y - 0.108, furnace.end.x - a, 0.216)
-	add_prim(0, BOX, [barrel.size.x * 0.5, 0.108, 0.002], barrel.get_center(), 0.0, 1, 0, 0.0, "barrel")
+	barrel = Rect2(a, y - ROD_HALF, furnace.end.x - a, 2.0 * ROD_HALF)
+	var bk := add_prim(0, BOX, [barrel.size.x * 0.5, ROD_HALF, 0.002], barrel.get_center(), 0.0, 1, 0, 0.0, "barrel")
+	prims[bk]["draw_hh"] = 0.12
 	# Stages, thickest first: stage k spans [x_k, x_k + L] with
 	# x_k = a + (h - a) (k + 1) / N, h = head's right face (the last stage carries the head).
 	var n := STAGES
@@ -281,13 +295,15 @@ func _pusher() -> void:
 	stage_len = l
 	stages.clear()
 	for k in n:
-		# 3 mm steps between stages (less than a grain radius): grains on the rod
-		# ride over the moving shoulders instead of being wedged against them.
-		var hh := 0.105 - 0.003 * k
 		var body := add_body(Vector2(a + l * 0.5, y), 0.0, "stage")
 		follow(body, pusher_body, Vector2(a, y), Vector2(half.x, 0.0), float(k + 1) / n, Vector2(l * 0.5, 0.0))
-		add_prim(body, BOX, [l * 0.5, hh, 0.01], Vector2.ZERO, 0.0, 1, 0, 0.0, "stage")
+		var sk := add_prim(body, BOX, [l * 0.5, ROD_HALF, 0.002], Vector2.ZERO, 0.0, 1, FLAG_VISUAL, 0.0, "stage")
+		prims[sk]["draw_hh"] = 0.106 - 0.004 * k
 		stages.append(body)
+	rod_anchor = a
+	var rod := add_body(Vector2(a, y), 0.0, "rod")
+	follow(rod, pusher_body, Vector2(a, y), Vector2(half.x, 0.0), 0.5, Vector2.ZERO)
+	rod_prim = add_prim(rod, BOX, [stroke * 0.5, ROD_HALF, 0.002], Vector2.ZERO, 0.0, 1, 0, 0.0, "rodcol")
 
 
 ## Phase modulation a such that x = (1 - cos(τ + a sin τ)) / 2 exceeds `outlet`
@@ -341,6 +357,15 @@ func prefill(n: int, rng: RandomNumberGenerator) -> ParticleSet:
 			y += dy
 			row += 1
 	return s
+
+
+## Machine poses at t, then the ram rod collider stretched from the head's back
+## face to the barrel mouth (+1 cm into each so there is no seam).
+func update(t: float) -> void:
+	super(t)
+	if rod_prim >= 0:
+		var h: float = bodies[pusher_body].pos.x + PUSHER_HALF.x
+		set_prim_shape(rod_prim, [maxf((rod_anchor - h) * 0.5, 0.0) + 0.01, ROD_HALF, 0.002])
 
 
 ## Loose hex fill of the lower bowl, clear of all colliders. Left half palette

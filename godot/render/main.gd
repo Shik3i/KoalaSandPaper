@@ -139,10 +139,10 @@ func _sim_frame() -> void:
 		hud.request(solver, spawned + prefill_n)
 	if args.has("shots") and str(solver.frames) in args.shots.split(","):
 		_shot(args.shot.replace(".png", "_f%d.png" % solver.frames))
-	if args.has("trace") and solver.frames % 200 == 0:
+	if args.has("trace") and solver.frames % int(args.get("trace_every", 200)) == 0:
 		var now := Time.get_ticks_msec()
 		var vp := get_viewport().get_viewport_rid()
-		print(JSON.stringify({"trace": solver.frames, "ms_per_frame": snappedf((now - _trace_t) / 200.0, 0.01), "pieces": solver.pieces_used,
+		print(JSON.stringify({"trace": solver.frames, "ms_per_frame": snappedf((now - _trace_t) / float(args.get("trace_every", 200)), 0.01), "pieces": solver.pieces_used,
 			"process_ms": snappedf(Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0, 0.01),
 			"render_cpu_ms": snappedf(RenderingServer.viewport_get_measured_render_time_cpu(vp), 0.01),
 			"render_gpu_ms": snappedf(RenderingServer.viewport_get_measured_render_time_gpu(vp), 0.01),

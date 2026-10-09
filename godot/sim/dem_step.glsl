@@ -56,11 +56,14 @@ void add_damper(float c, vec2 n, bool normal, vec2 v_other) {
 
 // Elastic + friction force on particle i from one contact (dampers go to D, B).
 // n: unit normal towards i, pen: overlap, vrel: velocity of i relative to the
-// other side at the contact, meff: effective mass for damping, zeta: damping ratio.
-vec2 contact_force(uint key, vec2 n, float pen, vec2 vrel, vec2 v_other, float meff, float zeta, float mu_s, float mu_k) {
+// other side at the contact, meff: effective mass for damping, zeta: damping ratio,
+// ks: stiffness multiplier (rigid bodies against machines/rigid bodies, see main).
+vec2 contact_force(uint key, vec2 n, float pen, vec2 vrel, vec2 v_other, float meff, float zeta, float mu_s, float mu_k, float ks) {
+	float kn = pc.kn * ks;
+	float kt = pc.kt * ks;
 	float vn = dot(vrel, n);
-	float gn = 2.0 * zeta * sqrt(pc.kn * meff);
-	float fn = pc.kn * pen - gn * vn;
+	float gn = 2.0 * zeta * sqrt(kn * meff);
+	float fn = kn * pen - gn * vn;
 	// gt = 2 zeta sqrt(kt meff) = gn sqrt(kt / kn) = gn sqrt(2 / 7).
 	if (fn <= 0.0) return vec2(0.0);  // separating fast: no tension, spring released
 	add_damper(gn, n, true, v_other);
@@ -74,16 +77,16 @@ vec2 contact_force(uint key, vec2 n, float pen, vec2 vrel, vec2 v_other, float m
 	// Coulomb on the elastic shear force (Cundall & Strack) with static/kinetic
 	// hysteresis: a sticking contact starts to slide above mu_s fn and keeps
 	// sliding at mu_k fn until the shear relaxes below that (then it sticks again).
-	float fe = pc.kt * length(xi);
+	float fe = kt * length(xi);
 	sliding = sliding ? fe >= mu_k * fn : fe > mu_s * fn;
 	if (sliding) {
 		xi *= mu_k * fn / fe;
 		hist_put(key, xi, true);
-		return pc.kn * pen * n - pc.kt * xi;
+		return kn * pen * n - kt * xi;
 	}
 	hist_put(key, xi, false);
 	add_damper(gn * 0.53452248, n, false, v_other);
-	return pc.kn * pen * n - pc.kt * xi;
+	return kn * pen * n - kt * xi;
 }
 
 void main() {
@@ -171,7 +174,7 @@ void main() {
 				vec4 mj = MAT[2u * matj];
 				vec2 vj = unpackHalf2x16(e.z);
 				f += contact_force(j + 1u, n, pen, vi - vj, vj, md_i * md_j / (md_i + md_j),
-						0.5 * (mi.z + mj.z), 0.5 * (mi.x + mj.x), 0.5 * (mi.y + mj.y));
+						0.5 * (mi.z + mj.z), 0.5 * (mi.x + mj.x), 0.5 * (mi.y + mj.y), 1.0);
 				max_pen = max(max_pen, pen / min(ri, rj));
 				n_contacts++;
 			}
@@ -204,7 +207,7 @@ void main() {
 				vs = vec2(0.0);
 				key = KEY_PRIM | (0xfff0u + w);
 			}
-			f += contact_force(key, n, pen, vi - vs, vs, md_i, mi.z, mu.x, mu.y);
+			f += contact_force(key, n, pen, vi - vs, vs, md_i, mi.z, mu.x, mu.y, 1.0);
 			max_pen = max(max_pen, pen / ri);
 			n_contacts++;
 		}
@@ -236,6 +239,7 @@ void main() {
 			for (;;) {
 				uint lb = subgroupBroadcastFirst(body);
 				if (body == lb) {
+					float s4 = subgroupMax(length(ft));
 					vec4 s1 = subgroupAdd(sa);
 					vec4 s2 = subgroupAdd(hp);
 					vec4 s3 = subgroupAdd(hn);
@@ -248,6 +252,8 @@ void main() {
 							if (s2[d] > 0.0) atomicAdd(ACC[a + 3u + 2u * d], s2[d]);
 							if (s3[d] > 0.0) atomicAdd(ACC[a + 4u + 2u * d], s3[d]);
 						}
+						// Largest single-grain load (float bits order like uints for >= 0).
+						atomicMax(ACC_U[a + 11u], floatBitsToUint(s4));
 					}
 					break;
 				}

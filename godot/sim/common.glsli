@@ -109,7 +109,9 @@ layout(set = 0, binding = 21, std430) restrict buffer RBodyBuf { vec4 RB[]; };
 layout(set = 0, binding = 22, std430) restrict buffer PieceBuf { uvec4 PIECES[]; };
 // Rigid-body force accumulators, three slots by step: per body force.xy, torque,
 // then the 8 directional half-sums of the crush measure (atomicAdd by grains).
+// Slot 11: largest single-grain contact force (float bits, atomicMax as uint).
 layout(set = 0, binding = 29, std430) restrict buffer AccBuf { float ACC[]; };
+layout(set = 0, binding = 29, std430) restrict buffer AccUBuf { uint ACC_U[]; };
 // Piece grain lists (slot indices, MAX_PIECE_GRAINS per piece) and spawn staging:
 // per grain (x.xy, v.xy), (rest.xy, info bits, colour bits).
 layout(set = 0, binding = 30, std430) restrict buffer PListBuf { uint PLIST[]; };
@@ -171,6 +173,7 @@ layout(push_constant, std430) uniform Params {
 // ~0.5 m/s, and every step of delay is overlap that would be released explosively.
 #define CRUSH_STEPS 4.0
 #define CRUSH_WEIGHTS 3.0
+#define OMEGA_MAX 20.0
 
 uint kind_of(uint info) { return (info >> 8u) & 0xffu; }
 uint heat_of(uint info) { return info >> 24u; }
@@ -295,7 +298,10 @@ Body body_now(uint b) {
 	float T = ACC[a + 2u];
 	float M = B.v.w;
 	B.v.xy = (B.v.xy + (F / M + pc.gravity) * pc.dt) * pc.damp;
-	B.v.z = (B.v.z + T / B.aux.w * pc.dt) * pc.damp;
+	// Spin capped at OMEGA_MAX: a chunk pinched in a nip gets large opposing
+	// contact torques; unbounded, its grains would inherit huge rim speeds when it
+	// crumbles. Real fragments do not out-spin the rollers (2-6 rad/s).
+	B.v.z = clamp((B.v.z + T / B.aux.w * pc.dt) * pc.damp, -OMEGA_MAX, OMEGA_MAX);
 	float sp = length(B.v.xy);
 	if (sp > pc.v_max) B.v.xy *= pc.v_max / sp;
 	B.c.xy += B.v.xy * pc.dt;
@@ -303,7 +309,12 @@ Body body_now(uint b) {
 	// Crush: force pushing from both sides at once, max over 4 directions.
 	float squeeze = 0.0;
 	for (uint d = 0u; d < 4u; d++) squeeze = max(squeeze, min(ACC[a + 3u + 2u * d], ACC[a + 4u + 2u * d]));
-	float limit = max(pc.crush_f, CRUSH_WEIGHTS * M * length(pc.gravity));
-	B.ex.z = squeeze > limit ? B.ex.z + 1.0 : max(B.ex.z - 0.25, 0.0);
+	// Chunks (generation 1) are already cracked: weaker than whole pieces.
+	float limit = B.aux.x < 0.5 ? max(pc.crush_f, CRUSH_WEIGHTS * M * length(pc.gravity))
+			: max(pc.crush_f / 3.0, M * length(pc.gravity));
+	// Point load: squeezed (two-sided) while a single grain carries more than
+	// crush_f (a press on one corner) breaks the body before that grain sinks deep.
+	bool point = squeeze > pc.crush_f / 3.0 && ACC[a + 11u] > pc.crush_f;
+	B.ex.z = squeeze > limit || point ? B.ex.z + 1.0 : max(B.ex.z - 0.25, 0.0);
 	return B;
 }
